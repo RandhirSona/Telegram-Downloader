@@ -120,6 +120,84 @@ class TestStorageConfigurationRegression(unittest.TestCase):
         self.assertEqual(self.cfg_mgr.get_download_dir(), new_idle_root)
 
     # -------------------------------------------------------------------------
+    # 4b. Selecting C: drive explicitly with user confirmation
+    # -------------------------------------------------------------------------
+    def test_04b_select_c_drive_explicitly_with_confirmation(self):
+        """Verify user can explicitly select a location on C: when confirming warning."""
+        from telegram_gui_downloader import TelegramGUIApp
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        app = None
+        try:
+            app = TelegramGUIApp(root)
+            app.config_mgr = self.cfg_mgr
+            app.engine = self.engine
+
+            c_folder = Path(self.tmpdir) / "C_Drive_Test_Folder"
+            c_folder.mkdir(parents=True, exist_ok=True)
+            app.storage_path_var.set(str(c_folder))
+
+            # User explicitly confirms C: warning
+            with patch("tkinter.messagebox.askyesno", return_value=True), \
+                 patch("tkinter.messagebox.showinfo"):
+                app.on_save_storage()
+
+            self.assertEqual(
+                str(self.cfg_mgr.get_download_dir()).lower(),
+                str(c_folder).lower()
+            )
+        finally:
+            if app and hasattr(app, "_after_id") and app._after_id:
+                try: root.after_cancel(app._after_id)
+                except Exception: pass
+            if app and hasattr(app, "lock") and app.lock:
+                app.lock.release_lock()
+            try: root.destroy()
+            except Exception: pass
+
+    # -------------------------------------------------------------------------
+    # 4c. Selecting C: drive cancelled by user
+    # -------------------------------------------------------------------------
+    def test_04c_select_c_drive_cancelled_by_user(self):
+        """Verify selecting C: does not persist if user declines the warning modal."""
+        from telegram_gui_downloader import TelegramGUIApp
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        app = None
+        try:
+            app = TelegramGUIApp(root)
+            app.config_mgr = self.cfg_mgr
+            app.engine = self.engine
+
+            original_dir = self.cfg_mgr.get_download_dir()
+            c_folder = Path(self.tmpdir) / "C_Drive_Declined_Folder"
+            c_folder.mkdir(parents=True, exist_ok=True)
+            app.storage_path_var.set(str(c_folder))
+
+            def mock_confirm(title, msg, **kwargs):
+                if "System Drive" in title or "(C:)" in title:
+                    return False
+                return True
+
+            with patch("tkinter.messagebox.askyesno", side_effect=mock_confirm):
+                app.on_save_storage()
+
+            # Active directory must remain the original directory
+            self.assertEqual(self.cfg_mgr.get_download_dir(), original_dir)
+        finally:
+            if app and hasattr(app, "_after_id") and app._after_id:
+                try: root.after_cancel(app._after_id)
+                except Exception: pass
+            if app and hasattr(app, "lock") and app.lock:
+                app.lock.release_lock()
+            try: root.destroy()
+            except Exception: pass
+
+    # -------------------------------------------------------------------------
     # 5. Preventing root changes during active transfers
     # -------------------------------------------------------------------------
     def test_05_preventing_root_changes_during_active_transfers(self):
@@ -129,6 +207,7 @@ class TestStorageConfigurationRegression(unittest.TestCase):
 
         root = tk.Tk()
         root.withdraw()
+        app = None
         try:
             app = TelegramGUIApp(root)
             app.config_mgr = self.cfg_mgr
@@ -146,7 +225,13 @@ class TestStorageConfigurationRegression(unittest.TestCase):
             self.assertEqual(self.cfg_mgr.get_download_dir(), self.initial_storage)
         finally:
             self.engine.is_downloading = False
-            root.destroy()
+            if app and hasattr(app, "_after_id") and app._after_id:
+                try: root.after_cancel(app._after_id)
+                except Exception: pass
+            if app and hasattr(app, "lock") and app.lock:
+                app.lock.release_lock()
+            try: root.destroy()
+            except Exception: pass
 
     # -------------------------------------------------------------------------
     # 6. Drive disconnection
