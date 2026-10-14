@@ -48,7 +48,7 @@ Built with **Python**, **Telethon MTProto API**, and **SQLite WAL**, the applica
 - **Interactive Chat Catalog & Instant Filter:** Browse all accessible dialogs with real-time search filtering that preserves active queries when selecting channels.
 - **Checkbox Multi-Selection:** Efficient bulk selection using checkboxes (`☐` / `☑`) with standard `Shift` and `Ctrl` range selection.
 - **Persistent Download List Manager:** Retains selected target channels across sessions, displaying verified Telegram titles and chat types (`Broadcast Channel` vs `Forum Supergroup`).
-- **Native Forum Topic Subfolder Routing (Stage B):** Automatically detects Telegram native forum supergroups, enumerates and caches forum topics, and routes messages directly into topic-specific directories (`<GroupName>/<TopicName>/<Filename>`).
+- **Native Forum Topic Subfolder Routing (Stage B):** Automatically detects Telegram native forum supergroups, enumerates and caches forum topics, and routes messages directly into topic-specific directories (`<GroupName>/<TopicName>/<Filename>`). *(Implemented in source code and verified across 20 automated tests; pending separate controlled production database activation).*
 - **Preserved Flat Layout for Ordinary Channels:** Non-forum broadcast channels and simple groups retain a clean flat folder structure (`<GroupName>/<Filename>`).
 - **Resilient Chunked Resume:** Downloads media in 512 KB chunks to temporary `.part` files. If a connection drops, downloads resume from the exact byte offset without redownloading.
 - **SQLite State Tracking & Duplicate Prevention:** Every completed download is tracked by Telegram channel ID and message ID in a local SQLite database in WAL mode. Completed files are never redownloaded.
@@ -59,6 +59,9 @@ Built with **Python**, **Telethon MTProto API**, and **SQLite WAL**, the applica
 ---
 
 ## Screenshot Gallery
+
+> [!NOTE]
+> **Privacy & Demonstration Notice:** All screenshots illustrate the actual Tkinter desktop application running on Windows using simulated, privacy-masked channel titles (`UPP***`, `Pre***`), synthetic IDs (`1001-1007`), and simulated progress telemetry to protect personal account privacy and credentials.
 
 All screenshots below represent the actual application interface running on Windows:
 
@@ -324,11 +327,11 @@ The project includes an isolated unit test suite covering authentication mocks, 
 
 ---
 
-## Development Roadmap
+## Development Roadmap & Current Production Status
 
-- [x] **Stage A:** Verified Telegram channel titles and Browse checkbox synchronization.
-- [x] **Stage B:** Native Telegram forum supergroup detection, MTProto topic pagination, and folder-aware download routing.
-- [ ] **Stage C (Planned):** Historical media directory reconciliation (optional migration of legacy flat downloads into topic folders).
+- [x] **Stage A (Live & Active in Production):** Verified Telegram channel titles and Browse checkbox multi-selection synchronization.
+- [x] **Stage B (Implemented & Isolated Testing Complete):** Native Telegram forum supergroup detection, MTProto topic pagination, and folder-aware download routing. *(All 20 unit tests verified; live database migration pending separate controlled authorization).*
+- [ ] **Stage C (In Preparation):** Safe historical existing-folder reconciliation (mapping legacy flat downloads to verified topic directories without modifying files prematurely).
 - [ ] **Stage D (Planned):** Automated background archive extraction (`.zip`, `.rar`, `.7z`) for completed downloads.
 
 ---
