@@ -1,0 +1,86 @@
+# ==============================================================================
+# Telegram Downloader - Git Ignore Configuration
+# Protects credentials, session secrets, databases, local logs, and private data
+# ==============================================================================
+
+# Credentials & environment configurations
+.env
+*.env
+!.env.example
+config.json
+!config.json.example
+
+# Telegram session state & crypto keys
+*.session
+*.session-journal
+*.session.tmp
+
+# SQLite databases & journals
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+download_tracker.db*
+
+# Locks & process coordination
+*.lock
+downloader.lock
+
+# Logs & runtime diagnostics
+logs/
+*.log
+*.log.*
+
+# Local backup snapshots & archived databases
+backups/
+*.bak
+
+# Virtual environments & dependencies
+.venv/
+venv/
+ENV/
+env/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Application runtime data & temporary scratch
+app_data/
+scratch/
+*.tmp
+*.temp
+
+# Downloaded files & partial resume files
+*.part
+*.ytdl
+*.mp4
+*.mkv
+*.pdf
+*.zip
+*.tar.*
+*.rar
+*.7z
+
+# Internal VM reports, benchmarks & test artifacts
+*REPORT*.md
+*AUDIT*.md
+*CHECKLIST*.md
+*BENCHMARK*.md
+*RESULTS*.json
+benchmark_results.json
+single_download_benchmark_results.json
+app/
+scripts/execute_*.py
+
+# OS & Editor generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo

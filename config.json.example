@@ -1,0 +1,17 @@
+{
+  "download_directory": "D:\\TelegramDownloads",
+  "min_free_space_gb": 5.0,
+  "scan_interval_minutes": 15,
+  "active_channels": [],
+  "media_filters": {
+    "PDFs": true,
+    "Videos": false,
+    "Photos": false,
+    "Voice/Audio": false,
+    "Documents (Other)": false,
+    "All Media": false
+  },
+  "cutoff_date": "",
+  "concurrent_downloads": 2,
+  "organize_forum_topics": true
+}
