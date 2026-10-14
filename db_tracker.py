@@ -164,10 +164,12 @@ class DownloadTrackerDB:
     def migrate_to_stage_b(self, conn=None) -> bool:
         """
         Applies non-destructive additive schema migrations for Stage B (topic support and persistent folder mappings).
+        Ensures composite identity (account_id, peer_type, channel_id, topic_id) for forum_topics.
         Can be called on live or cloned databases safely without affecting existing rows or constraints.
         """
         def _apply(c):
-            c.executescript("""
+            # 1. Create channel_storage_mapping table if not exists
+            c.execute("""
                 CREATE TABLE IF NOT EXISTS channel_storage_mapping (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_id INTEGER NOT NULL,
@@ -180,26 +182,78 @@ class DownloadTrackerDB:
                     updated_at TEXT NOT NULL,
                     UNIQUE(account_id, peer_type, channel_id)
                 );
-
-                CREATE TABLE IF NOT EXISTS forum_topics (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    channel_id INTEGER NOT NULL,
-                    topic_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    local_folder_name TEXT NOT NULL,
-                    is_closed INTEGER DEFAULT 0,
-                    is_hidden INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(channel_id, topic_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_channel_storage_mapping 
-                ON channel_storage_mapping(account_id, peer_type, channel_id);
-
-                CREATE INDEX IF NOT EXISTS idx_forum_topics 
-                ON forum_topics(channel_id, topic_id);
             """)
+            c.execute("CREATE INDEX IF NOT EXISTS idx_channel_storage_mapping ON channel_storage_mapping(account_id, peer_type, channel_id);")
+
+            # 2. Check forum_topics table
+            t_check = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='forum_topics'").fetchone()
+            if not t_check:
+                c.execute("""
+                    CREATE TABLE forum_topics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        account_id INTEGER NOT NULL DEFAULT 0,
+                        peer_type TEXT NOT NULL DEFAULT 'channel',
+                        channel_id INTEGER NOT NULL,
+                        topic_id INTEGER NOT NULL,
+                        title TEXT NOT NULL,
+                        local_folder_name TEXT NOT NULL,
+                        is_closed INTEGER DEFAULT 0,
+                        is_hidden INTEGER DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(account_id, peer_type, channel_id, topic_id)
+                    );
+                """)
+                c.execute("CREATE INDEX IF NOT EXISTS idx_forum_topics_scoped ON forum_topics(account_id, peer_type, channel_id, topic_id);")
+            else:
+                c_info = c.execute("PRAGMA table_info(forum_topics)").fetchall()
+                cols = {r[1] for r in c_info}
+                if "account_id" not in cols:
+                    # Account-scoped table swap migration
+                    c.execute("""
+                        CREATE TABLE forum_topics_scoped_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            account_id INTEGER NOT NULL DEFAULT 0,
+                            peer_type TEXT NOT NULL DEFAULT 'channel',
+                            channel_id INTEGER NOT NULL,
+                            topic_id INTEGER NOT NULL,
+                            title TEXT NOT NULL,
+                            local_folder_name TEXT NOT NULL,
+                            is_closed INTEGER DEFAULT 0,
+                            is_hidden INTEGER DEFAULT 0,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            UNIQUE(account_id, peer_type, channel_id, topic_id)
+                        );
+                    """)
+                    c.execute("""
+                        INSERT INTO forum_topics_scoped_new
+                        (account_id, peer_type, channel_id, topic_id, title, local_folder_name, is_closed, is_hidden, created_at, updated_at)
+                        SELECT
+                            COALESCE(
+                                (SELECT csm.account_id FROM channel_storage_mapping csm WHERE csm.channel_id = ft.channel_id LIMIT 1),
+                                (SELECT ds.account_id FROM download_selections ds WHERE ds.channel_id = ft.channel_id LIMIT 1),
+                                0
+                            ) AS account_id,
+                            COALESCE(
+                                (SELECT csm.peer_type FROM channel_storage_mapping csm WHERE csm.channel_id = ft.channel_id LIMIT 1),
+                                'channel'
+                            ) AS peer_type,
+                            ft.channel_id,
+                            ft.topic_id,
+                            ft.title,
+                            ft.local_folder_name,
+                            ft.is_closed,
+                            ft.is_hidden,
+                            ft.created_at,
+                            ft.updated_at
+                        FROM forum_topics ft;
+                    """)
+                    c.execute("DROP TABLE forum_topics;")
+                    c.execute("ALTER TABLE forum_topics_scoped_new RENAME TO forum_topics;")
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_forum_topics_scoped ON forum_topics(account_id, peer_type, channel_id, topic_id);")
+
+            # 3. Downloads table topic columns
             cursor = c.execute("PRAGMA table_info(downloads)")
             cols = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cursor.fetchall()}
             if "topic_id" not in cols:
@@ -301,25 +355,45 @@ class DownloadTrackerDB:
         title: str,
         local_folder_name: str,
         is_closed: bool = False,
-        is_hidden: bool = False
+        is_hidden: bool = False,
+        account_id: int = None,
+        peer_type: str = "channel"
     ) -> Dict[str, Any]:
-        """Caches or updates forum topic metadata and folder mapping."""
+        """Caches or updates forum topic metadata and folder mapping scoped to account and peer_type."""
         norm_cid = normalize_channel_id(channel_id)
+        eff_acc_id = account_id if account_id is not None else 0
         now_str = datetime.now(timezone.utc).isoformat()
         with self._get_connection() as conn:
-            conn.execute("""
-                INSERT INTO forum_topics
-                (channel_id, topic_id, title, local_folder_name, is_closed, is_hidden, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(channel_id, topic_id) DO UPDATE SET
-                    title = excluded.title,
-                    local_folder_name = excluded.local_folder_name,
-                    is_closed = excluded.is_closed,
-                    is_hidden = excluded.is_hidden,
-                    updated_at = excluded.updated_at
-            """, (norm_cid, topic_id, title, local_folder_name, 1 if is_closed else 0, 1 if is_hidden else 0, now_str, now_str))
+            c_info = conn.execute("PRAGMA table_info(forum_topics)").fetchall()
+            cols = {r[1] for r in c_info}
+            if "account_id" in cols:
+                conn.execute("""
+                    INSERT INTO forum_topics
+                    (account_id, peer_type, channel_id, topic_id, title, local_folder_name, is_closed, is_hidden, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_id, peer_type, channel_id, topic_id) DO UPDATE SET
+                        title = excluded.title,
+                        local_folder_name = excluded.local_folder_name,
+                        is_closed = excluded.is_closed,
+                        is_hidden = excluded.is_hidden,
+                        updated_at = excluded.updated_at
+                """, (eff_acc_id, peer_type, norm_cid, topic_id, title, local_folder_name, 1 if is_closed else 0, 1 if is_hidden else 0, now_str, now_str))
+            else:
+                conn.execute("""
+                    INSERT INTO forum_topics
+                    (channel_id, topic_id, title, local_folder_name, is_closed, is_hidden, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(channel_id, topic_id) DO UPDATE SET
+                        title = excluded.title,
+                        local_folder_name = excluded.local_folder_name,
+                        is_closed = excluded.is_closed,
+                        is_hidden = excluded.is_hidden,
+                        updated_at = excluded.updated_at
+                """, (norm_cid, topic_id, title, local_folder_name, 1 if is_closed else 0, 1 if is_hidden else 0, now_str, now_str))
             conn.commit()
         return {
+            "account_id": eff_acc_id,
+            "peer_type": peer_type,
             "channel_id": norm_cid,
             "topic_id": topic_id,
             "title": title,
@@ -328,42 +402,66 @@ class DownloadTrackerDB:
             "is_hidden": bool(is_hidden)
         }
 
-    def get_forum_topics(self, channel_id: int) -> List[Dict[str, Any]]:
-        """Returns all cached forum topics for a channel."""
+    def get_forum_topics(self, channel_id: int, account_id: int = None, peer_type: str = "channel") -> List[Dict[str, Any]]:
+        """Returns all cached forum topics for a channel, scoped by account_id and peer_type if provided."""
         norm_cid = normalize_channel_id(channel_id)
         with self._get_connection() as conn:
             t_check = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='forum_topics'").fetchone()
             if not t_check:
                 return []
-            cursor = conn.execute("""
-                SELECT * FROM forum_topics
-                WHERE channel_id = ?
-                ORDER BY topic_id ASC
-            """, (norm_cid,))
+            c_info = conn.execute("PRAGMA table_info(forum_topics)").fetchall()
+            cols = {r[1] for r in c_info}
+            if "account_id" in cols and account_id is not None:
+                cursor = conn.execute("""
+                    SELECT * FROM forum_topics
+                    WHERE channel_id = ? AND account_id = ? AND peer_type = ?
+                    ORDER BY topic_id ASC
+                """, (norm_cid, account_id, peer_type))
+            else:
+                cursor = conn.execute("""
+                    SELECT * FROM forum_topics
+                    WHERE channel_id = ?
+                    ORDER BY topic_id ASC
+                """, (norm_cid,))
             return [dict(r) for r in cursor.fetchall()]
 
-    def get_forum_topic(self, channel_id: int, topic_id: int) -> Optional[Dict[str, Any]]:
-        """Returns single cached forum topic by channel_id and topic_id."""
+    def get_forum_topic(self, channel_id: int, topic_id: int, account_id: int = None, peer_type: str = "channel") -> Optional[Dict[str, Any]]:
+        """Returns single cached forum topic by channel_id and topic_id, scoped by account_id and peer_type if provided."""
         norm_cid = normalize_channel_id(channel_id)
         with self._get_connection() as conn:
             t_check = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='forum_topics'").fetchone()
             if not t_check:
                 return None
-            cursor = conn.execute("""
-                SELECT * FROM forum_topics
-                WHERE channel_id = ? AND topic_id = ?
-            """, (norm_cid, topic_id))
+            c_info = conn.execute("PRAGMA table_info(forum_topics)").fetchall()
+            cols = {r[1] for r in c_info}
+            if "account_id" in cols and account_id is not None:
+                cursor = conn.execute("""
+                    SELECT * FROM forum_topics
+                    WHERE channel_id = ? AND topic_id = ? AND account_id = ? AND peer_type = ?
+                """, (norm_cid, topic_id, account_id, peer_type))
+            else:
+                cursor = conn.execute("""
+                    SELECT * FROM forum_topics
+                    WHERE channel_id = ? AND topic_id = ?
+                """, (norm_cid, topic_id))
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def resolve_unique_topic_folder_name(self, channel_id: int, topic_id: int, base_title: str) -> str:
+    def resolve_unique_topic_folder_name(
+        self,
+        channel_id: int,
+        topic_id: int,
+        base_title: str,
+        account_id: int = None,
+        peer_type: str = "channel"
+    ) -> str:
         """
         Ensures stable and collision-free local folder name for a topic within a channel.
-        If an existing mapping exists for (channel_id, topic_id), retains it.
-        If another topic in the same channel already claims base_title, disambiguates as 'base_title [topic_id]'.
+        If an existing mapping exists for (account_id, peer_type, channel_id, topic_id), retains it.
+        If another topic in the same channel claims base_title, disambiguates as 'base_title [topic_id]'.
         """
         norm_cid = normalize_channel_id(channel_id)
-        existing = self.get_forum_topic(norm_cid, topic_id)
+        existing = self.get_forum_topic(norm_cid, topic_id, account_id=account_id, peer_type=peer_type)
         if existing and existing.get("local_folder_name"):
             return existing["local_folder_name"]
 
@@ -371,14 +469,21 @@ class DownloadTrackerDB:
         with self._get_connection() as conn:
             t_check = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='forum_topics'").fetchone()
             if t_check:
-                cursor = conn.execute("""
-                    SELECT topic_id FROM forum_topics
-                    WHERE channel_id = ? AND local_folder_name = ? AND topic_id != ?
-                """, (norm_cid, safe_name, topic_id))
+                c_info = conn.execute("PRAGMA table_info(forum_topics)").fetchall()
+                cols = {r[1] for r in c_info}
+                if "account_id" in cols and account_id is not None:
+                    cursor = conn.execute("""
+                        SELECT topic_id FROM forum_topics
+                        WHERE account_id = ? AND peer_type = ? AND channel_id = ? AND local_folder_name = ? AND topic_id != ?
+                    """, (account_id, peer_type, norm_cid, safe_name, topic_id))
+                else:
+                    cursor = conn.execute("""
+                        SELECT topic_id FROM forum_topics
+                        WHERE channel_id = ? AND local_folder_name = ? AND topic_id != ?
+                    """, (norm_cid, safe_name, topic_id))
                 if cursor.fetchone():
                     safe_name = f"{safe_name} [{topic_id}]"
         return safe_name
-
 
     def migrate_legacy_history_if_needed(self, legacy_json_path="download_history.json"):
         legacy_file = Path(legacy_json_path)
@@ -881,6 +986,19 @@ class DownloadTrackerDB:
             """, (account_id, peer_type, norm_cid))
             row = cursor.fetchone()
             return bool(row and row["is_selected"] == 1)
+
+    def get_selection(self, account_id: int, channel_id: int, peer_type: str = "channel") -> Optional[Dict[str, Any]]:
+        """Returns single selection record by account_id, channel_id, peer_type."""
+        if account_id is None:
+            return None
+        norm_cid = normalize_channel_id(channel_id)
+        with self._get_connection() as conn:
+            cursor = conn.execute("""
+                SELECT * FROM download_selections
+                WHERE account_id = ? AND peer_type = ? AND channel_id = ?
+            """, (account_id, peer_type, norm_cid))
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
     def sync_to_legacy_config(self, account_id: int, config_mgr) -> int:
         """Atomically synchronizes active channel IDs from SQLite into config.json for backward compatibility."""

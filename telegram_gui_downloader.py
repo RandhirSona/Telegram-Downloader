@@ -92,6 +92,11 @@ class TelegramGUIApp:
         self.checked_channels = set()  # set of (peer_type, norm_cid) temporary UI selections
         self.current_filtered_dialogs = []  # currently visible dialog list
 
+        # Mandatory Scoped Topic Selection State: (account_id, peer_type, norm_cid, topic_id)
+        self.checked_topics = set()
+        self.current_topic_inspector_channel = None  # (peer_type, norm_cid, title)
+        self.controlled_acceptance_test_mode = bool(self.config_mgr.config.get("controlled_topic_test_mode", False))
+
         # Check process lock
         self.lock = ProcessLock(role="gui")
         self.is_monitoring_mode = False
@@ -296,7 +301,7 @@ class TelegramGUIApp:
 
         # List Manager Summary Header
         manager_header = ttk.Frame(self.list_frame)
-        manager_header.pack(fill=tk.X, pady=(0, 8))
+        manager_header.pack(fill=tk.X, pady=(0, 6))
 
         self.manager_summary_var = tk.StringVar(value="Active Selections: 0 channels ready for download")
         lbl_mgr_summary = ttk.Label(manager_header, textvariable=self.manager_summary_var, font=("Segoe UI", 10, "bold"))
@@ -305,16 +310,21 @@ class TelegramGUIApp:
         btn_add_more = ttk.Button(manager_header, text="+ Add More Channels/Groups", command=lambda: self.notebook.select(self.browse_frame))
         btn_add_more.pack(side=tk.RIGHT)
 
-        # Download List TreeView
-        list_tree_frame = ttk.Frame(self.list_frame)
-        list_tree_frame.pack(fill=tk.BOTH, expand=True)
+        # PanedWindow for Channels List and Forum Topics Browser
+        self.paned_list = ttk.PanedWindow(self.list_frame, orient=tk.VERTICAL)
+        self.paned_list.pack(fill=tk.BOTH, expand=True)
 
-        list_scroll = ttk.Scrollbar(list_tree_frame, orient="vertical")
+        # Top Pane: Channels / Groups TreeView
+        channels_frame = ttk.Frame(self.paned_list)
+        self.paned_list.add(channels_frame, weight=3)
+
+        list_scroll = ttk.Scrollbar(channels_frame, orient="vertical")
         self.download_tree = ttk.Treeview(
-            list_tree_frame,
+            channels_frame,
             columns=("name", "type", "id", "date_added", "status"),
             show="headings",
-            selectmode="extended",
+            selectmode="browse",
+            height=6,
             yscrollcommand=list_scroll.set
         )
         list_scroll.config(command=self.download_tree.yview)
@@ -327,21 +337,94 @@ class TelegramGUIApp:
         self.download_tree.heading("date_added", text="Date Added", anchor=tk.W)
         self.download_tree.heading("status", text="Access Status", anchor=tk.W)
 
-        self.download_tree.column("name", width=420, anchor=tk.W)
-        self.download_tree.column("type", width=120, anchor=tk.W)
-        self.download_tree.column("id", width=140, anchor=tk.W)
-        self.download_tree.column("date_added", width=160, anchor=tk.W)
-        self.download_tree.column("status", width=120, anchor=tk.W)
+        self.download_tree.column("name", width=380, anchor=tk.W)
+        self.download_tree.column("type", width=140, anchor=tk.W)
+        self.download_tree.column("id", width=120, anchor=tk.W)
+        self.download_tree.column("date_added", width=150, anchor=tk.W)
+        self.download_tree.column("status", width=110, anchor=tk.W)
+
+        self.download_tree.bind("<<TreeviewSelect>>", self.on_download_tree_select)
+
+        # Bottom Pane: Forum Topic Browser Frame
+        self.topic_inspector_frame = ttk.LabelFrame(self.paned_list, text="Forum Topic Browser (Select a Group Above)", padding=8)
+        self.paned_list.add(self.topic_inspector_frame, weight=4)
+
+        # Topic Inspector Header / Actions Bar
+        topic_header = ttk.Frame(self.topic_inspector_frame)
+        topic_header.pack(fill=tk.X, pady=(0, 6))
+
+        self.topic_inspector_status_var = tk.StringVar(value="Select a Forum Supergroup above to view topics.")
+        lbl_topic_status = ttk.Label(topic_header, textvariable=self.topic_inspector_status_var, font=("Segoe UI", 9, "bold"))
+        lbl_topic_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.btn_select_all_topics = ttk.Button(topic_header, text="Select All", command=self.on_select_all_topics, state="disabled")
+        self.btn_select_all_topics.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_unselect_all_topics = ttk.Button(topic_header, text="Unselect All", command=self.on_unselect_all_topics, state="disabled")
+        self.btn_unselect_all_topics.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_refresh_topics = ttk.Button(topic_header, text="↻ Refresh Topics", command=self.on_refresh_topics_from_telegram, state="disabled")
+        self.btn_refresh_topics.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_download_topics = ttk.Button(
+            topic_header,
+            text="⬇ Download Selected Topics (0)",
+            command=self.on_download_selected_topics,
+            state="disabled"
+        )
+        self.btn_download_topics.pack(side=tk.LEFT)
+
+        # Topic TreeView
+        topic_tree_frame = ttk.Frame(self.topic_inspector_frame)
+        topic_tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        topic_scroll = ttk.Scrollbar(topic_tree_frame, orient="vertical")
+        self.topic_tree = ttk.Treeview(
+            topic_tree_frame,
+            columns=("select", "id", "title", "status", "folder"),
+            show="headings",
+            selectmode="browse",
+            height=6,
+            yscrollcommand=topic_scroll.set
+        )
+        topic_scroll.config(command=self.topic_tree.yview)
+        topic_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.topic_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.topic_tree.heading("select", text="Sel", anchor=tk.CENTER)
+        self.topic_tree.heading("id", text="Topic ID", anchor=tk.CENTER)
+        self.topic_tree.heading("title", text="Verified Topic Title", anchor=tk.W)
+        self.topic_tree.heading("status", text="Status", anchor=tk.CENTER)
+        self.topic_tree.heading("folder", text="Estimated Destination Folder", anchor=tk.W)
+
+        self.topic_tree.column("select", width=45, anchor=tk.CENTER)
+        self.topic_tree.column("id", width=80, anchor=tk.CENTER)
+        self.topic_tree.column("title", width=300, anchor=tk.W)
+        self.topic_tree.column("status", width=110, anchor=tk.CENTER)
+        self.topic_tree.column("folder", width=360, anchor=tk.W)
+
+        self.topic_tree.bind("<Button-1>", self.on_topic_tree_click)
+        self.topic_tree.bind("<Double-1>", self.on_topic_tree_double_click)
+        self.topic_tree.bind("<space>", self.on_topic_tree_space)
+        self.topic_tree.bind("<Button-3>", self.on_topic_context_menu)
+
+        # Context Menu for Topics
+        self.topic_context_menu = tk.Menu(self.root, tearoff=0)
+        self.topic_context_menu.add_command(label="Toggle Selection Checkbox", command=self.on_topic_context_toggle)
+        self.topic_context_menu.add_command(label="Download Only This Topic", command=self.on_topic_context_download_single)
+        self.topic_context_menu.add_separator()
+        self.topic_context_menu.add_command(label="Copy Topic Title", command=self.on_copy_topic_title)
+        self.topic_context_menu.add_command(label="Copy Topic ID", command=self.on_copy_topic_id)
 
         # Action Toolbar in Download List Manager
         manager_toolbar = ttk.Frame(self.list_frame)
-        manager_toolbar.pack(fill=tk.X, pady=(10, 0))
+        manager_toolbar.pack(fill=tk.X, pady=(8, 0))
 
-        self.btn_download_mgr = ttk.Button(manager_toolbar, text="Start Downloads", command=self.on_download)
-        self.btn_download_mgr.pack(side=tk.LEFT, padx=(0, 5))
+        self.btn_download_mgr = ttk.Button(manager_toolbar, text="Start Downloads (All Saved Channels)", command=self.on_download)
+        self.btn_download_mgr.pack(side=tk.LEFT, padx=(0, 6))
 
-        btn_remove_mgr = ttk.Button(manager_toolbar, text="Remove Selected", command=self.on_remove_selected_from_manager)
-        btn_remove_mgr.pack(side=tk.LEFT, padx=(0, 5))
+        btn_remove_mgr = ttk.Button(manager_toolbar, text="Remove Selected Channels", command=self.on_remove_selected_from_manager)
+        btn_remove_mgr.pack(side=tk.LEFT, padx=(0, 6))
 
         btn_clear_mgr = ttk.Button(manager_toolbar, text="Clear All Selections", command=self.on_clear_list)
         btn_clear_mgr.pack(side=tk.LEFT, padx=(0, 15))
@@ -587,6 +670,566 @@ class TelegramGUIApp:
                     sel.get("access_status", "OK")
                 )
             )
+
+        # Re-evaluate topic inspector selection
+        if self.current_topic_inspector_channel:
+            curr_pt, curr_cid, _ = self.current_topic_inspector_channel
+            expected_iid = f"{curr_pt}_{curr_cid}"
+            if self.download_tree.exists(expected_iid):
+                self.download_tree.selection_set(expected_iid)
+                self.refresh_topic_inspector()
+            else:
+                self.current_topic_inspector_channel = None
+                self._clear_topic_inspector("Selected channel removed from Download List.")
+
+    def _clear_topic_inspector(self, status_msg: str):
+        """Clears topic inspector tree and disables topic-specific actions."""
+        if hasattr(self, "topic_tree"):
+            for item in self.topic_tree.get_children():
+                self.topic_tree.delete(item)
+        if hasattr(self, "topic_inspector_status_var"):
+            self.topic_inspector_status_var.set(status_msg)
+        if hasattr(self, "btn_select_all_topics"):
+            self.btn_select_all_topics.config(state="disabled")
+        if hasattr(self, "btn_unselect_all_topics"):
+            self.btn_unselect_all_topics.config(state="disabled")
+        if hasattr(self, "btn_refresh_topics"):
+            self.btn_refresh_topics.config(state="disabled")
+        if hasattr(self, "btn_download_topics"):
+            self.btn_download_topics.config(state="disabled", text="⬇ Download Selected Topics (0)")
+
+    def on_download_tree_select(self, event=None):
+        """Triggered when the user highlights a channel in Download List Manager."""
+        sel_items = self.download_tree.selection()
+        if not sel_items:
+            self.current_topic_inspector_channel = None
+            self._clear_topic_inspector("Select a Forum Supergroup above to view topics.")
+            return
+
+        iid = sel_items[0]
+        vals = self.download_tree.item(iid, "values")
+        if not vals or len(vals) < 3:
+            return
+
+        title = vals[0]
+        type_label = vals[1]
+        cid = int(vals[2])
+        parts = iid.split("_", 1)
+        peer_type = parts[0] if len(parts) == 2 else "channel"
+
+        if type_label != "Forum Supergroup":
+            self.current_topic_inspector_channel = None
+            self._clear_topic_inspector(f"'{title}' is a {type_label} (Broadcast Channel — No topics exist).")
+            return
+
+        # Scoped Forum Supergroup selected
+        self.current_topic_inspector_channel = (peer_type, cid, title)
+        self.refresh_topic_inspector()
+
+    def refresh_topic_inspector(self):
+        """Renders forum topics for the currently selected supergroup from cache."""
+        if not self.current_topic_inspector_channel:
+            return
+
+        account_id = self.get_account_id()
+        if not account_id:
+            self._clear_topic_inspector("Please log in to view forum topics.")
+            return
+
+        peer_type, cid, title = self.current_topic_inspector_channel
+
+        # Clear existing rows
+        for item in self.topic_tree.get_children():
+            self.topic_tree.delete(item)
+
+        topics = self.db.get_forum_topics(cid, account_id=account_id, peer_type=peer_type)
+        if not topics:
+            self.topic_inspector_status_var.set(
+                f"Forum Supergroup: '{title}' (0 topics in cache. Click 'Refresh Topics' to query Telegram)."
+            )
+            self.btn_refresh_topics.config(state="normal")
+            self.btn_select_all_topics.config(state="disabled")
+            self.btn_unselect_all_topics.config(state="disabled")
+            self.btn_download_topics.config(state="disabled", text="⬇ Download Selected Topics (0)")
+            return
+
+        # Resolve destination folder prefix
+        mapping = self.db.get_channel_storage_mapping(account_id, cid, peer_type)
+        if mapping and mapping.get("local_folder_name"):
+            channel_folder_name = mapping["local_folder_name"]
+        else:
+            channel_folder_name = sanitize_folder_name(title)
+
+        checked_for_channel = []
+        for t in topics:
+            tid = t["topic_id"]
+            t_title = t.get("title") or f"Topic_{tid}"
+            key = (account_id, peer_type, cid, tid)
+            is_checked = (key in self.checked_topics)
+            if is_checked:
+                checked_for_channel.append(tid)
+            check_sym = "☑" if is_checked else "☐"
+
+            is_closed = bool(t.get("is_closed"))
+            is_hidden = bool(t.get("is_hidden"))
+            is_inaccessible = bool(t.get("is_inaccessible", False))
+
+            if is_inaccessible:
+                status_str = "Inaccessible"
+            elif is_hidden:
+                status_str = "Hidden"
+            elif is_closed:
+                status_str = "Closed"
+            else:
+                status_str = "Available"
+
+            topic_folder = t.get("local_folder_name") or sanitize_folder_name(t_title)
+            est_dest = f"{channel_folder_name}\\{topic_folder}"
+
+            self.topic_tree.insert(
+                "",
+                "end",
+                iid=f"topic_{tid}",
+                values=(check_sym, tid, t_title, status_str, est_dest)
+            )
+
+        count = len(checked_for_channel)
+        self.topic_inspector_status_var.set(
+            f"Forum Supergroup: '{title}' — {len(topics)} topic(s) cached | {count} selected"
+        )
+        self.btn_refresh_topics.config(state="normal")
+        self.btn_select_all_topics.config(state="normal")
+        self.btn_unselect_all_topics.config(state="normal")
+        self.btn_download_topics.config(
+            state="normal" if count > 0 else "disabled",
+            text=f"⬇ Download Selected Topics ({count})"
+        )
+
+    def on_topic_tree_click(self, event):
+        """Handles single click on topic treeview to toggle checkbox when clicking select column."""
+        region = self.topic_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            col = self.topic_tree.identify_column(event.x)
+            if col == "#1":  # 'select' column
+                item_iid = self.topic_tree.identify_row(event.y)
+                if item_iid:
+                    self.toggle_topic_checkbox(item_iid)
+
+    def on_topic_tree_double_click(self, event):
+        """Double clicking any part of a topic row toggles its checkbox."""
+        item_iid = self.topic_tree.identify_row(event.y)
+        if item_iid:
+            self.toggle_topic_checkbox(item_iid)
+
+    def on_topic_tree_space(self, event):
+        """Spacebar toggles checkbox for highlighted topic."""
+        sel = self.topic_tree.selection()
+        if sel:
+            self.toggle_topic_checkbox(sel[0])
+
+    def toggle_topic_checkbox(self, item_iid: str):
+        """Toggles temporary selection state for an individual topic under stable composite identity."""
+        if not self.current_topic_inspector_channel or not self.topic_tree.exists(item_iid):
+            return
+
+        account_id = self.get_account_id()
+        if not account_id:
+            return
+
+        peer_type, cid, title = self.current_topic_inspector_channel
+        vals = list(self.topic_tree.item(item_iid, "values"))
+        if len(vals) < 5:
+            return
+
+        tid = int(vals[1])
+        t_title = vals[2]
+        status_str = vals[3]
+
+        if status_str == "Inaccessible":
+            messagebox.showwarning(
+                "Unavailable Topic",
+                f"Topic '{t_title}' (ID: {tid}) is marked Inaccessible and cannot be selected for download."
+            )
+            return
+
+        key = (account_id, peer_type, cid, tid)
+        if key in self.checked_topics:
+            self.checked_topics.remove(key)
+            is_checked = False
+        else:
+            self.checked_topics.add(key)
+            is_checked = True
+
+        vals[0] = "☑" if is_checked else "☐"
+        self.topic_tree.item(item_iid, values=vals)
+
+        # Re-evaluate count
+        checked_for_channel = [
+            t_id for (acc, pt, c, t_id) in self.checked_topics
+            if acc == account_id and pt == peer_type and c == cid
+        ]
+        count = len(checked_for_channel)
+        total_topics = len(self.topic_tree.get_children())
+        self.topic_inspector_status_var.set(
+            f"Forum Supergroup: '{title}' — {total_topics} topic(s) cached | {count} selected"
+        )
+        self.btn_download_topics.config(
+            state="normal" if count > 0 else "disabled",
+            text=f"⬇ Download Selected Topics ({count})"
+        )
+
+    def on_select_all_topics(self):
+        """Selects all accessible topics for the currently viewed forum supergroup only."""
+        if not self.current_topic_inspector_channel:
+            return
+
+        account_id = self.get_account_id()
+        if not account_id:
+            return
+
+        peer_type, cid, title = self.current_topic_inspector_channel
+        updated = 0
+        for item in self.topic_tree.get_children():
+            vals = list(self.topic_tree.item(item, "values"))
+            tid = int(vals[1])
+            status_str = vals[3]
+            if status_str != "Inaccessible":
+                self.checked_topics.add((account_id, peer_type, cid, tid))
+                vals[0] = "☑"
+                self.topic_tree.item(item, values=vals)
+                updated += 1
+
+        total_topics = len(self.topic_tree.get_children())
+        self.topic_inspector_status_var.set(
+            f"Forum Supergroup: '{title}' — {total_topics} topic(s) cached | {updated} selected"
+        )
+        self.btn_download_topics.config(
+            state="normal" if updated > 0 else "disabled",
+            text=f"⬇ Download Selected Topics ({updated})"
+        )
+
+    def on_unselect_all_topics(self):
+        """Unselects all topics for the currently viewed forum supergroup only."""
+        if not self.current_topic_inspector_channel:
+            return
+
+        account_id = self.get_account_id()
+        if not account_id:
+            return
+
+        peer_type, cid, title = self.current_topic_inspector_channel
+        for item in self.topic_tree.get_children():
+            vals = list(self.topic_tree.item(item, "values"))
+            tid = int(vals[1])
+            self.checked_topics.discard((account_id, peer_type, cid, tid))
+            vals[0] = "☐"
+            self.topic_tree.item(item, values=vals)
+
+        total_topics = len(self.topic_tree.get_children())
+        self.topic_inspector_status_var.set(
+            f"Forum Supergroup: '{title}' — {total_topics} topic(s) cached | 0 selected"
+        )
+        self.btn_download_topics.config(state="disabled", text="⬇ Download Selected Topics (0)")
+
+    def on_refresh_topics_from_telegram(self):
+        """Non-blocking background refresh of topics for currently viewed forum supergroup."""
+        if not self.current_topic_inspector_channel or not self.engine:
+            return
+
+        account_id = self.get_account_id()
+        if not account_id:
+            messagebox.showwarning("Authentication Required", "Please log in first.")
+            return
+
+        peer_type, cid, title = self.current_topic_inspector_channel
+        self.btn_refresh_topics.config(state="disabled", text="Refreshing...")
+
+        async def fetch_topics_task():
+            try:
+                sel = self.db.get_selection(account_id, cid, peer_type)
+                if not sel:
+                    sel = {"account_id": account_id, "peer_type": peer_type, "channel_id": cid, "title": title}
+                entity = await self.engine.resolve_selection_entity(sel)
+                if not entity:
+                    self.ui_queue.put(("log", f"Failed to resolve Telegram entity for '{title}' (ID {cid})."))
+                    self.ui_queue.put(("topics_refreshed", (cid, 0)))
+                    return
+                topics_dict = await self.engine.get_or_fetch_forum_topics(entity, cid, force_refresh=True)
+                self.ui_queue.put(("log", f"Discovered {len(topics_dict)} forum topic(s) for '{title}'."))
+                self.ui_queue.put(("topics_refreshed", (cid, len(topics_dict))))
+            except Exception as e:
+                logger.error(f"Error fetching topics from Telegram for {cid}: {e}")
+                self.ui_queue.put(("log", f"Error refreshing topics for '{title}': {e}"))
+                self.ui_queue.put(("topics_refreshed", (cid, 0)))
+
+        asyncio.run_coroutine_threadsafe(fetch_topics_task(), self.loop)
+
+    def on_download_selected_topics(self):
+        """
+        Executes download strictly scoped to checked topics of the currently viewed forum supergroup.
+        Mandatory: Fails closed if 0 topics selected. Under no circumstances falls back to all channels.
+        """
+        valid, msg, _ = self.config_mgr.validate_storage()
+        if not valid:
+            messagebox.showerror("Invalid Storage", f"Cannot start downloads:\n{msg}\n\nNO fallback to C: drive allowed.")
+            return
+
+        account_id = self.get_account_id()
+        if not account_id:
+            messagebox.showwarning("Authentication Required", "Please log in first.")
+            return
+
+        if not self.current_topic_inspector_channel:
+            messagebox.showwarning("Select Forum Supergroup", "Please select a Forum Supergroup from the list above.")
+            return
+
+        peer_type, cid, title = self.current_topic_inspector_channel
+
+        # Retrieve selected topic IDs under scoped composite identity
+        checked_tids = [
+            tid for (acc, pt, c, tid) in self.checked_topics
+            if acc == account_id and pt == peer_type and c == cid
+        ]
+
+        if not checked_tids:
+            messagebox.showwarning(
+                "No Topics Selected",
+                f"No topics are currently checked for '{title}'.\n\n"
+                "Please check at least one topic checkbox before clicking Download Selected Topics."
+            )
+            return
+
+        is_acceptance_mode = bool(
+            getattr(self, "controlled_acceptance_test_mode", False) or
+            self.config_mgr.config.get("controlled_topic_test_mode", False)
+        )
+        norm_cid = normalize_channel_id(cid)
+        is_test_target = (
+            is_acceptance_mode and
+            norm_cid == 4450272939 and
+            peer_type == "channel" and
+            150 in checked_tids
+        )
+
+        if is_test_target:
+            dest_dir = self.config_mgr.get_download_dir() / "Premium 2027" / "DAILY NEWSPAPER"
+            confirm_msg = (
+                "CONTROLLED ACCEPTANCE TEST MODE (Strictly Bounded)\n\n"
+                f"Target Supergroup: '{title}' (ID: {cid}, Peer: {peer_type})\n"
+                f"Authenticated Account ID: {account_id}\n"
+                f"Topic: DAILY NEWSPAPER (ID: 150)\n"
+                f"Destination Directory: {dest_dir}\n\n"
+                "Approved Media Files (Strict Message Allowlist):\n"
+                "  1. INDIAN EXPRESS HD Delhi 13~10~2026.pdf\n"
+                "     - Message ID: 1613\n"
+                "     - Size: 6,215,860 bytes (~5.93 MB)\n"
+                "     - MIME: application/pdf\n"
+                "  2. INDIAN EXPRESS HD Delhi 12~10~2026.pdf\n"
+                "     - Message ID: 1607\n"
+                "     - Size: 6,654,297 bytes (~6.35 MB)\n"
+                "     - MIME: application/pdf\n\n"
+                "Enforced Safety Limits:\n"
+                "  • Target Topic IDs: {150}\n"
+                "  • Allowed Message IDs: [1613, 1607]\n"
+                "  • Max Completed Files: 2\n"
+                "  • Max Total Bytes: 15,000,000 bytes (~14.31 MB)\n"
+                "  • Total Approved Payload: 12,870,157 bytes (~12.27 MB)\n\n"
+                "Proceed with bounded acceptance test download?"
+            )
+            confirm = messagebox.askyesno("Confirm Controlled Acceptance Test", confirm_msg)
+            if not confirm:
+                return
+        else:
+            # Build human-readable topic list for explicit confirmation
+            cached_topics = self.db.get_forum_topics(cid, account_id=account_id, peer_type=peer_type)
+            topic_title_map = {t["topic_id"]: t.get("title", f"Topic_{t['topic_id']}") for t in cached_topics}
+
+            topic_lines = [f"  • {topic_title_map.get(tid, f'Topic {tid}')} (ID: {tid})" for tid in checked_tids[:8]]
+            if len(checked_tids) > 8:
+                topic_lines.append(f"  ... and {len(checked_tids) - 8} more topic(s)")
+            topic_summary_str = "\n".join(topic_lines)
+
+            confirm = messagebox.askyesno(
+                "Confirm Scoped Topic Download",
+                f"Start downloading media from {len(checked_tids)} selected topic(s) in:\n"
+                f"'{title}' (ID: {cid})?\n\n"
+                f"Selected Topics:\n{topic_summary_str}\n\n"
+                f"IMPORTANT: Only '{title}' will be processed. Other channels in your Download List will NOT be touched.\n\n"
+                f"Proceed with download?"
+            )
+            if not confirm:
+                return
+
+        self.on_save_settings()
+
+        async def prepare_and_run_scoped():
+            self.ui_queue.put(("status", f"Resolving Telegram entity for forum '{title}'..."))
+            sel = self.db.get_selection(account_id, cid, peer_type)
+            if not sel:
+                sel = {"account_id": account_id, "peer_type": peer_type, "channel_id": cid, "title": title}
+            entity = await self.engine.resolve_selection_entity(sel)
+            if not entity:
+                self.ui_queue.put(("log", f"Error: Could not resolve Telegram entity for channel {cid} ({title})."))
+                self.ui_queue.put(("download_ended", None))
+                return
+
+            selected_dialogs = [{
+                "id": cid,
+                "name": title,
+                "peer_type": peer_type,
+                "entity": entity
+            }]
+
+            if is_test_target:
+                # Immediate pre-transfer validation of topic & message identities
+                cached_check = self.db.get_forum_topics(cid, account_id=account_id, peer_type=peer_type)
+                valid_tids = {t["topic_id"] for t in cached_check}
+                if 150 not in valid_tids:
+                    self.ui_queue.put(("log", "Error: Topic 150 ('DAILY NEWSPAPER') not found in verified forum catalog."))
+                    self.ui_queue.put(("download_ended", None))
+                    return
+
+                self.ui_queue.put((
+                    "log",
+                    f"Starting controlled acceptance test download for '{title}' (Topic 150, Messages [1613, 1607], Max 2 files, Max 15MB)..."
+                ))
+                await self.engine.run_batch(
+                    selected_dialogs,
+                    target_topic_ids={150},
+                    max_completed_files=2,
+                    expected_channel_id=4450272939,
+                    expected_peer_type="channel",
+                    expected_account_id=account_id,
+                    allowed_message_ids=[1613, 1607],
+                    max_total_bytes=15000000
+                )
+            else:
+                self.ui_queue.put((
+                    "log",
+                    f"Starting scoped topic download for '{title}' (Topics: {checked_tids})..."
+                ))
+                await self.engine.run_batch(
+                    selected_dialogs,
+                    target_topic_ids=set(checked_tids),
+                    expected_channel_id=cid,
+                    expected_peer_type=peer_type,
+                    expected_account_id=account_id
+                )
+
+        self.btn_download.config(state="disabled")
+        if hasattr(self, "btn_download_mgr"):
+            self.btn_download_mgr.config(state="disabled")
+        if hasattr(self, "btn_download_topics"):
+            self.btn_download_topics.config(state="disabled")
+        self.btn_stop.config(state="normal")
+        self.notebook.select(self.main_frame)
+
+        asyncio.run_coroutine_threadsafe(prepare_and_run_scoped(), self.loop)
+
+    def on_download_single_topic(self, topic_id: int):
+        """Downloads only the single specified topic in the currently viewed forum supergroup."""
+        valid, msg, _ = self.config_mgr.validate_storage()
+        if not valid:
+            messagebox.showerror("Invalid Storage", f"Cannot start downloads:\n{msg}\n\nNO fallback to C: drive allowed.")
+            return
+
+        account_id = self.get_account_id()
+        if not account_id or not self.current_topic_inspector_channel:
+            return
+
+        peer_type, cid, title = self.current_topic_inspector_channel
+        topic_rec = self.db.get_forum_topic(cid, topic_id, account_id=account_id, peer_type=peer_type)
+        t_title = topic_rec.get("title") if topic_rec else f"Topic_{topic_id}"
+
+        confirm = messagebox.askyesno(
+            "Confirm Single Topic Download",
+            f"Download media ONLY from topic:\n"
+            f"'{t_title}' (ID: {topic_id})\n\n"
+            f"in Forum Supergroup '{title}'?\n\n"
+            f"Note: Only this single topic will be processed. Proceed?"
+        )
+        if not confirm:
+            return
+
+        self.on_save_settings()
+
+        async def prepare_and_run_single():
+            self.ui_queue.put(("status", f"Resolving Telegram entity for forum '{title}'..."))
+            sel = self.db.get_selection(account_id, cid, peer_type)
+            if not sel:
+                sel = {"account_id": account_id, "peer_type": peer_type, "channel_id": cid, "title": title}
+            entity = await self.engine.resolve_selection_entity(sel)
+            if not entity:
+                self.ui_queue.put(("log", f"Error: Could not resolve Telegram entity for channel {cid} ({title})."))
+                self.ui_queue.put(("download_ended", None))
+                return
+
+            selected_dialogs = [{
+                "id": cid,
+                "name": title,
+                "peer_type": peer_type,
+                "entity": entity
+            }]
+            self.ui_queue.put((
+                "log",
+                f"Starting single-topic download for '{title}' -> Topic '{t_title}' (ID {topic_id})..."
+            ))
+            await self.engine.run_batch(
+                selected_dialogs,
+                target_topic_ids={topic_id},
+                expected_channel_id=cid,
+                expected_peer_type=peer_type,
+                expected_account_id=account_id
+            )
+
+        self.btn_download.config(state="disabled")
+        if hasattr(self, "btn_download_mgr"):
+            self.btn_download_mgr.config(state="disabled")
+        if hasattr(self, "btn_download_topics"):
+            self.btn_download_topics.config(state="disabled")
+        self.btn_stop.config(state="normal")
+        self.notebook.select(self.main_frame)
+
+        asyncio.run_coroutine_threadsafe(prepare_and_run_single(), self.loop)
+
+    def on_topic_context_menu(self, event):
+        """Displays right-click context menu on highlighted topic row."""
+        item = self.topic_tree.identify_row(event.y)
+        if item:
+            self.topic_tree.selection_set(item)
+            try:
+                self.topic_context_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self.topic_context_menu.grab_release()
+
+    def on_topic_context_toggle(self):
+        sel = self.topic_tree.selection()
+        if sel:
+            self.toggle_topic_checkbox(sel[0])
+
+    def on_topic_context_download_single(self):
+        sel = self.topic_tree.selection()
+        if sel:
+            vals = self.topic_tree.item(sel[0], "values")
+            if len(vals) >= 2:
+                tid = int(vals[1])
+                self.on_download_single_topic(tid)
+
+    def on_copy_topic_title(self):
+        sel = self.topic_tree.selection()
+        if sel:
+            vals = self.topic_tree.item(sel[0], "values")
+            if len(vals) >= 3:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(vals[2])
+
+    def on_copy_topic_id(self):
+        sel = self.topic_tree.selection()
+        if sel:
+            vals = self.topic_tree.item(sel[0], "values")
+            if len(vals) >= 2:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(str(vals[1]))
 
     def toggle_checkbox(self, iid: str):
         parts = iid.split("_", 1)
@@ -1074,10 +1717,25 @@ class TelegramGUIApp:
                 self.on_refresh_list()
             elif msg_type == "storage_error":
                 messagebox.showerror("Storage Halt", f"Download halted: {data}\n\nNO fallback to C: drive allowed.")
+            elif msg_type == "topics_refreshed":
+                cid, count = data
+                if hasattr(self, "btn_refresh_topics"):
+                    self.btn_refresh_topics.config(state="normal", text="↻ Refresh Topics")
+                self.refresh_topic_inspector()
             elif msg_type == "download_ended":
                 self.btn_download.config(state="normal")
                 if hasattr(self, "btn_download_mgr"):
                     self.btn_download_mgr.config(state="normal")
+                if hasattr(self, "btn_download_topics"):
+                    # Re-evaluate topic download button
+                    if self.current_topic_inspector_channel:
+                        acc_id = self.get_account_id()
+                        pt, cid, _ = self.current_topic_inspector_channel
+                        checked = [tid for (a, p, c, tid) in self.checked_topics if a == acc_id and p == pt and c == cid]
+                        self.btn_download_topics.config(
+                            state="normal" if checked else "disabled",
+                            text=f"⬇ Download Selected Topics ({len(checked)})"
+                        )
                 self.btn_stop.config(state="disabled")
 
         if not self._is_closing:

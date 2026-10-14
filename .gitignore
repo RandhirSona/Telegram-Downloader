@@ -75,6 +75,16 @@ benchmark_results.json
 single_download_benchmark_results.json
 app/
 scripts/execute_*.py
+scripts/apply_*.py
+scripts/audit_*.py
+scripts/create_and_verify_*.py
+scripts/debug_*.py
+scripts/inspect_*.py
+scripts/patch_*.py
+scripts/run_*.py
+scripts/test_clone_*.py
+scripts/verify_*.py
+docs/screenshots/gui_topic_browser_*.png
 
 # OS & Editor generated files
 .DS_Store

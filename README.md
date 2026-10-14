@@ -3,7 +3,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Telethon 1.43.2](https://img.shields.io/badge/telethon-1.43.2-blue.svg)](https://github.com/LonamiWebs/Telethon)
 [![Platform Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey.svg)](https://microsoft.com/windows)
-[![Tests Passing](https://img.shields.io/badge/tests-105%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-162%20passed-brightgreen.svg)]()
 [![License MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 An enterprise-grade, high-reliability Telegram media downloader designed for seamless batch media acquisition, unattended 24/7 background operation, and intelligent forum topic subfolder routing on Windows.
@@ -21,7 +21,7 @@ An enterprise-grade, high-reliability Telegram media downloader designed for sea
 - [Application Usage](#application-usage)
   - [1. Login Tab](#1-login-tab)
   - [2. Browse & Search Channels](#2-browse--search-channels)
-  - [3. Download List Manager](#3-download-list-manager)
+  - [3. Download List Manager & Forum Topic Browser](#3-download-list-manager--forum-topic-browser)
   - [4. Downloader & Logs](#4-downloader--logs)
 - [Folder & Storage Architecture](#folder--storage-architecture)
 - [Resuming & Duplicate Prevention](#resuming--duplicate-prevention)
@@ -48,7 +48,9 @@ Built with **Python**, **Telethon MTProto API**, and **SQLite WAL**, the applica
 - **Interactive Chat Catalog & Instant Filter:** Browse all accessible dialogs with real-time search filtering that preserves active queries when selecting channels.
 - **Checkbox Multi-Selection:** Efficient bulk selection using checkboxes (`☐` / `☑`) with standard `Shift` and `Ctrl` range selection.
 - **Persistent Download List Manager:** Retains selected target channels across sessions, displaying verified Telegram titles and chat types (`Broadcast Channel` vs `Forum Supergroup`).
-- **Native Forum Topic Subfolder Routing (Stage B):** Automatically detects Telegram native forum supergroups, enumerates and caches forum topics, and routes messages directly into topic-specific directories (`<GroupName>/<TopicName>/<Filename>`). *(Implemented in source code and verified across 20 automated tests; pending separate controlled production database activation).*
+- **Interactive Forum Topic Browser (Stage B):** Inspect nested forum topics with verified topic titles, stable topic IDs, closed/hidden status, and estimated local folder paths.
+- **Selective Topic Downloading & Composite Identity Guards:** Download only user-selected topics with fail-closed security guards that strictly validate the composite identity `(account_id, peer_type, channel_id)`.
+- **Native Forum Topic Subfolder Routing:** Automatically detects Telegram native forum supergroups, enumerates and caches forum topics, and routes messages directly into topic-specific directories (`<GroupName>/<TopicName>/<Filename>`).
 - **Preserved Flat Layout for Ordinary Channels:** Non-forum broadcast channels and simple groups retain a clean flat folder structure (`<GroupName>/<Filename>`).
 - **Resilient Chunked Resume:** Downloads media in 512 KB chunks to temporary `.part` files. If a connection drops, downloads resume from the exact byte offset without redownloading.
 - **SQLite State Tracking & Duplicate Prevention:** Every completed download is tracked by Telegram channel ID and message ID in a local SQLite database in WAL mode. Completed files are never redownloaded.
@@ -193,11 +195,12 @@ Displays current authentication status, session validity, and controls for sendi
 - **Checkbox Multi-Selection:** Check or uncheck individual items or use `Shift`/`Ctrl` range selection.
 - **Bulk Action:** Click `Add Selected to Download List` to add items directly to your persistent queue.
 
-### 3. Download List Manager
-- Displays channels currently active in your download queue.
-- Shows verified real titles, chat type (`Forum Supergroup` vs `Channel`), and date added.
-- **Remove Selected:** Remove one or more channels from active queue.
-- **Clear All Selections:** Clears all queued channels.
+### 3. Download List Manager & Forum Topic Browser
+- **Queue Overview:** Displays channels currently active in your download queue with verified real titles, chat types (`Forum Supergroup` vs `Broadcast Channel`), and dates added.
+- **Forum Topic Browser Split-Pane:** When selecting any forum supergroup, the lower panel dynamically displays its nested forum topics with verified topic titles, stable topic IDs, availability status (open/closed/hidden), and estimated local folder paths.
+- **Topic Multi-Selection:** Check or uncheck individual topics using checkboxes (`☐` / `☑`), or use bulk **Select All Topics** / **Unselect All Topics** controls.
+- **Dedicated Topic Action:** Click **Download Selected Topics** to download media exclusively from the checked topics of that specific supergroup without affecting other channels.
+- **Queue Management:** Remove selected channels or clear the entire queue with a single click.
 
 ### 4. Downloader & Logs
 - **Storage Destination:** Set and validate target download path with live free-space reporting.
@@ -322,15 +325,17 @@ The project includes an isolated unit test suite covering authentication mocks, 
 ```
 
 **Test Coverage Summary:**
-- 20 / 20 Stage B Topic Routing Tests Passed
-- 105 / 105 Total Unit Tests Passed (0 Regressions)
+- 20 / 20 Stage B Topic Routing & Navigation Tests Passed
+- 35 / 35 Composite Identity & Safety Guard Tests Passed
+- 22 / 22 Forum Topic Browser GUI Tests Passed
+- 162 / 162 Total Unit Tests Passed (0 Regressions)
 
 ---
 
 ## Development Roadmap & Current Production Status
 
 - [x] **Stage A (Live & Active in Production):** Verified Telegram channel titles and Browse checkbox multi-selection synchronization.
-- [x] **Stage B (Implemented & Isolated Testing Complete):** Native Telegram forum supergroup detection, MTProto topic pagination, and folder-aware download routing. *(All 20 unit tests verified; live database migration pending separate controlled authorization).*
+- [x] **Stage B (Live Acceptance Verified):** Native Telegram forum supergroup detection, MTProto topic pagination, topic-aware download routing, interactive Forum Topic Browser in GUI, composite identity security guards `(account_id, peer_type, channel_id)`, and successful live two-PDF bounded acceptance test.
 - [ ] **Stage C (In Preparation):** Safe historical existing-folder reconciliation (mapping legacy flat downloads to verified topic directories without modifying files prematurely).
 - [ ] **Stage D (Planned):** Automated background archive extraction (`.zip`, `.rar`, `.7z`) for completed downloads.
 

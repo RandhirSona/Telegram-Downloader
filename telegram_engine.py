@@ -7,14 +7,14 @@ import time
 import mimetypes
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, Callable, Tuple
+from typing import Optional, List, Dict, Any, Callable, Tuple, Set, Union
 from dotenv import load_dotenv
 
 import sqlite3
 
 from telethon import TelegramClient
 from telethon.tl.types import (
-    Chat, Channel, DocumentAttributeFilename, DocumentAttributeVideo,
+    Chat, Channel, User, DocumentAttributeFilename, DocumentAttributeVideo,
     MessageMediaPhoto, MessageMediaDocument,
     ForumTopic, ForumTopicDeleted, MessageReplyHeader
 )
@@ -91,7 +91,7 @@ class TelegramDownloaderEngine:
         self.phone_code_hash: Optional[str] = None
         self.account_id: Optional[int] = None
         self.dialogs_cache: Dict[Tuple[str, int], Dict[str, Any]] = {}
-        self._forum_topics_cache: Dict[int, Dict[int, Dict[str, Any]]] = {}
+        self._forum_topics_cache: Dict[Tuple[Optional[int], str, int], Dict[int, Dict[str, Any]]] = {}
 
         # Initialize native OpenSSL hardware AES acceleration
         accel_ok, accel_msg = init_crypto_acceleration()
@@ -447,19 +447,37 @@ class TelegramDownloaderEngine:
             idx += 1
         return candidate
 
-    async def get_or_fetch_forum_topics(self, entity, channel_id: int, force_refresh: bool = False) -> Dict[int, Dict[str, Any]]:
+    async def get_or_fetch_forum_topics(
+        self,
+        entity,
+        channel_id: int,
+        force_refresh: bool = False,
+        peer_type: Optional[str] = None
+    ) -> Dict[int, Dict[str, Any]]:
         """
         Enumerates and caches native forum topics for a forum supergroup using Telethon messages.GetForumTopicsRequest.
         Handles pagination, closed/hidden topics, General topic membership, and deleted topics.
-        Caches in-memory and in SQLite forum_topics table to avoid repeated API requests.
+        Caches in-memory and in SQLite forum_topics table to avoid repeated API requests, scoped by complete composite identity:
+        (account_id, peer_type, normalized_channel_id).
         """
         norm_cid = normalize_channel_id(channel_id)
-        if not force_refresh and norm_cid in self._forum_topics_cache:
-            return self._forum_topics_cache[norm_cid]
+        if peer_type is None:
+            if isinstance(entity, Channel):
+                peer_type = "channel"
+            elif isinstance(entity, Chat):
+                peer_type = "chat"
+            elif isinstance(entity, User):
+                peer_type = "user"
+            else:
+                peer_type = "channel"
+        pt = str(peer_type).strip().lower()
+        cache_key = (self.account_id, pt, norm_cid)
+        if not force_refresh and cache_key in self._forum_topics_cache:
+            return self._forum_topics_cache[cache_key]
 
         # Check database cache first if not force_refresh
         if not force_refresh:
-            db_topics = self.db.get_forum_topics(norm_cid)
+            db_topics = self.db.get_forum_topics(norm_cid, account_id=self.account_id, peer_type=pt)
             if db_topics:
                 cached_dict = {}
                 for dt in db_topics:
@@ -470,13 +488,13 @@ class TelegramDownloaderEngine:
                         "is_closed": bool(dt.get("is_closed", 0)),
                         "is_hidden": bool(dt.get("is_hidden", 0))
                     }
-                self._forum_topics_cache[norm_cid] = cached_dict
+                self._forum_topics_cache[cache_key] = cached_dict
                 return cached_dict
 
         # If not in cache or forced, fetch from Telegram
         is_forum = getattr(entity, "forum", False) and getattr(entity, "megagroup", False)
         if not is_forum:
-            self._forum_topics_cache[norm_cid] = {}
+            self._forum_topics_cache[cache_key] = {}
             return {}
 
         topics_dict: Dict[int, Dict[str, Any]] = {}
@@ -518,14 +536,18 @@ class TelegramDownloaderEngine:
                     is_closed = bool(getattr(t, "closed", False))
                     is_hidden = bool(getattr(t, "hidden", False))
 
-                safe_folder = self.db.resolve_unique_topic_folder_name(norm_cid, t_id, title)
+                safe_folder = self.db.resolve_unique_topic_folder_name(
+                    norm_cid, t_id, title, account_id=self.account_id, peer_type=pt
+                )
                 self.db.save_forum_topic(
                     channel_id=norm_cid,
                     topic_id=t_id,
                     title=title,
                     local_folder_name=safe_folder,
                     is_closed=is_closed,
-                    is_hidden=is_hidden
+                    is_hidden=is_hidden,
+                    account_id=self.account_id,
+                    peer_type=pt
                 )
                 topics_dict[t_id] = {
                     "id": t_id,
@@ -547,14 +569,18 @@ class TelegramDownloaderEngine:
 
         # Ensure General topic (topic_id=1) is registered if not explicitly present
         if 1 not in topics_dict:
-            gen_folder = self.db.resolve_unique_topic_folder_name(norm_cid, 1, "General")
+            gen_folder = self.db.resolve_unique_topic_folder_name(
+                norm_cid, 1, "General", account_id=self.account_id, peer_type=pt
+            )
             self.db.save_forum_topic(
                 channel_id=norm_cid,
                 topic_id=1,
                 title="General",
                 local_folder_name=gen_folder,
                 is_closed=False,
-                is_hidden=False
+                is_hidden=False,
+                account_id=self.account_id,
+                peer_type=pt
             )
             topics_dict[1] = {
                 "id": 1,
@@ -564,7 +590,7 @@ class TelegramDownloaderEngine:
                 "is_hidden": False
             }
 
-        self._forum_topics_cache[norm_cid] = topics_dict
+        self._forum_topics_cache[cache_key] = topics_dict
         logger.info(f"Enumerated {len(topics_dict)} forum topics for channel {norm_cid}.")
         return topics_dict
 
@@ -706,10 +732,14 @@ class TelegramDownloaderEngine:
         if is_forum and organize_topics:
             if topic_id is not None:
                 effective_title = topic_title or f"Topic_{topic_id}"
-                topic_folder_name = self.db.resolve_unique_topic_folder_name(norm_cid, topic_id, effective_title)
+                topic_folder_name = self.db.resolve_unique_topic_folder_name(
+                    norm_cid, topic_id, effective_title, account_id=self.account_id, peer_type=peer_type
+                )
                 # Persist topic if not present in DB
-                if not self.db.get_forum_topic(norm_cid, topic_id):
-                    self.db.save_forum_topic(norm_cid, topic_id, effective_title, topic_folder_name)
+                if not self.db.get_forum_topic(norm_cid, topic_id, account_id=self.account_id, peer_type=peer_type):
+                    self.db.save_forum_topic(
+                        norm_cid, topic_id, effective_title, topic_folder_name, account_id=self.account_id, peer_type=peer_type
+                    )
                 target_dir = channel_dir / topic_folder_name
                 eff_topic_id = topic_id
                 eff_topic_title = effective_title
@@ -760,7 +790,9 @@ class TelegramDownloaderEngine:
         is_forum: bool = False,
         topic_id: Optional[int] = None,
         topic_title: Optional[str] = None,
-        channel_name: str = ""
+        channel_name: str = "",
+        bytes_prior: int = 0,
+        max_total_bytes: Optional[int] = None
     ):
         """
         Executes safe download with crash-safe .part staging, topic routing, and SQLite tracking.
@@ -768,6 +800,13 @@ class TelegramDownloaderEngine:
         channel_id = normalize_channel_id(channel_id)
         ch_name = channel_name or channel_folder.name
         self.db.ensure_channel(channel_id, ch_name)
+
+        # Byte budget enforcement before transfer
+        if max_total_bytes is not None and expected_size > 0 and (bytes_prior + expected_size) > max_total_bytes:
+            raise ValueError(
+                f"Byte budget exceeded before transfer for message {message.id}: "
+                f"{bytes_prior + expected_size} > {max_total_bytes}"
+            )
 
         # Central destination-path resolution
         msg_date = getattr(message, "date", None)
@@ -826,6 +865,11 @@ class TelegramDownloaderEngine:
         async def progress_cb(current, total):
             if self.cancel_flag:
                 raise CancelledByUser("Download cancelled by user.")
+            if max_total_bytes is not None and (bytes_prior + current) > max_total_bytes:
+                raise ValueError(
+                    f"Byte budget exceeded during transfer for message {message.id}: "
+                    f"{bytes_prior + current} > {max_total_bytes}"
+                )
             nonlocal last_update, last_current
             now = time.monotonic()
             elapsed = now - last_update
@@ -878,6 +922,14 @@ class TelegramDownloaderEngine:
                                 f.flush()
                                 os.fsync(f.fileno())
                                 raise CancelledByUser("Download cancelled by user.")
+                            # Fail-closed byte budget enforcement during chunk reception
+                            if max_total_bytes is not None and (bytes_prior + current_bytes + len(chunk)) > max_total_bytes:
+                                f.flush()
+                                os.fsync(f.fileno())
+                                raise ValueError(
+                                    f"Byte budget exceeded during chunk transfer for message {message.id}: "
+                                    f"{bytes_prior + current_bytes + len(chunk)} > {max_total_bytes}"
+                                )
                             f.write(chunk)
                             current_bytes += len(chunk)
                             await progress_cb(current_bytes, expected_size)
@@ -961,8 +1013,13 @@ class TelegramDownloaderEngine:
         media_filters: Dict[str, bool],
         cutoff_date: Optional[datetime],
         channel_idx: int = 1,
-        total_channels: int = 1
-    ):
+        total_channels: int = 1,
+        target_topic_id: Optional[int] = None,
+        target_topic_ids: Optional[Union[Set[int], List[int]]] = None,
+        max_completed_files: Optional[int] = None,
+        allowed_message_ids: Optional[List[int]] = None,
+        max_total_bytes: Optional[int] = None
+    ) -> int:
         """Processes a single channel: scans messages, retries failed ones, downloads new ones."""
         download_root = self.config_mgr.get_download_dir()
         safe_folder_name = sanitize_folder_name(channel_name)
@@ -976,7 +1033,18 @@ class TelegramDownloaderEngine:
         peer_type = "channel" if isinstance(entity, Channel) else "chat"
         if self.account_id and not self.db.is_selected(self.account_id, channel_id, peer_type):
             self.emit("log", f"Skipping {channel_name}: removed from active Download List.")
-            return
+            return 0
+
+        # Unified single-topic and multi-topic filtering logic
+        effective_topic_ids: Optional[Set[int]] = None
+        if target_topic_ids is not None:
+            effective_topic_ids = set(target_topic_ids)
+            # Mandatory fail-closed rule: empty or invalid set never falls back to all topics or all channels
+            if len(effective_topic_ids) == 0:
+                self.emit("log", f"Empty topic selection set provided for {channel_name}. Failing closed (0 downloads).")
+                return 0
+        elif target_topic_id is not None:
+            effective_topic_ids = {target_topic_id}
 
         channel_folder.mkdir(parents=True, exist_ok=True)
         self.emit("log", f"\n=== [{channel_idx}/{total_channels}] Channel: {channel_name} ===")
@@ -989,16 +1057,24 @@ class TelegramDownloaderEngine:
         topics_dict = {}
         if is_forum:
             self.emit("status", f"Discovering forum topics for {channel_name}...")
-            topics_dict = await self.get_or_fetch_forum_topics(entity, channel_id)
+            topics_dict = await self.get_or_fetch_forum_topics(entity, channel_id, peer_type=peer_type)
             self.emit("log", f"Detected native forum supergroup: {len(topics_dict)} topics available.")
+
+        completed_count = 0
+        downloaded_bytes_total = 0
 
         # First, check previously failed messages for retry
         failed_records = self.db.get_failed_messages(channel_id, max_retries=5)
         if failed_records:
             self.emit("log", f"Retrying {len(failed_records)} previously failed messages in {channel_name}...")
             for fail_rec in failed_records:
-                if self.cancel_flag: return
+                if self.cancel_flag: return completed_count
+                if max_completed_files is not None and completed_count >= max_completed_files:
+                    self.emit("log", f"Reached maximum completed files limit ({max_completed_files}).")
+                    return completed_count
                 msg_id = fail_rec["message_id"]
+                if allowed_message_ids is not None and msg_id not in allowed_message_ids:
+                    continue
                 try:
                     msg = await self.client.get_messages(entity, ids=msg_id)
                     if msg:
@@ -1008,12 +1084,21 @@ class TelegramDownloaderEngine:
                             t_title = fail_rec.get("topic_title")
                             if t_id is None and is_forum:
                                 t_id, t_title = self.resolve_message_topic(msg, channel_id, is_forum, topics_dict)
+                            if effective_topic_ids is not None and t_id not in effective_topic_ids:
+                                continue
+                            if max_total_bytes is not None and downloaded_bytes_total + (fsize or 0) > max_total_bytes:
+                                self.emit("log", f"Reached maximum allowed download size limit ({max_total_bytes} bytes).")
+                                return completed_count
                             await self.download_single_message(
                                 msg, channel_id, channel_folder, fname, fsize or 0,
                                 status_prefix=f"[Retry {msg_id}] ",
                                 is_forum=is_forum, topic_id=t_id, topic_title=t_title,
-                                channel_name=channel_name
+                                channel_name=channel_name,
+                                bytes_prior=downloaded_bytes_total,
+                                max_total_bytes=max_total_bytes
                             )
+                            completed_count += 1
+                            downloaded_bytes_total += (fsize or 0)
                 except Exception as e:
                     logger.warning(f"Retry failed for message {msg_id}: {e}")
 
@@ -1030,21 +1115,67 @@ class TelegramDownloaderEngine:
                 continue
 
             highest_msg_id = max(highest_msg_id, msg.id)
+            if allowed_message_ids is not None and msg.id not in allowed_message_ids:
+                continue
             allowed, fname, fsize = self.match_media(msg, media_filters, cutoff_date)
             if allowed:
                 # If already completed in DB, skip collecting
                 if not self.db.is_message_downloaded(channel_id, msg.id):
-                    t_id, t_title = self.resolve_message_topic(msg, channel_id, is_forum, topics_dict)
-                    matching_messages.append((msg, fname, fsize or 0, t_id, t_title))
+                    # Reject unknown or zero file sizes
+                    if fsize is None or fsize <= 0:
+                        self.emit("log", f"Rejecting message {msg.id}: unknown or zero file size ({fsize}).")
+                        continue
 
-        if self.cancel_flag: return
+                    # Reject unexpected media sizes exceeding budget
+                    if max_total_bytes is not None and fsize > max_total_bytes:
+                        self.emit("log", f"Rejecting message {msg.id}: file size {fsize} exceeds max budget {max_total_bytes}.")
+                        continue
+
+                    # Reject different MIME types when restricted to allowlist
+                    if allowed_message_ids is not None:
+                        doc = getattr(msg.media, "document", None) if getattr(msg, "media", None) else None
+                        mime = (getattr(doc, "mime_type", "") or "").lower()
+                        if mime != "application/pdf":
+                            self.emit("log", f"Rejecting message {msg.id}: MIME type '{mime}' is not approved 'application/pdf'.")
+                            continue
+
+                    t_id, t_title = self.resolve_message_topic(msg, channel_id, is_forum, topics_dict)
+                    if effective_topic_ids is not None and t_id not in effective_topic_ids:
+                        self.emit("log", f"Rejecting message {msg.id}: topic association changed or unexpected ({t_id} not in {effective_topic_ids}).")
+                        continue
+                    matching_messages.append((msg, fname, fsize or 0, t_id, t_title))
+                    if allowed_message_ids is not None and len(matching_messages) >= len(allowed_message_ids):
+                        break
+                    if max_completed_files is not None and len(matching_messages) >= max_completed_files:
+                        break
+
+        if self.cancel_flag: return completed_count
 
         total_to_download = len(matching_messages)
         self.emit("log", f"Found {total_to_download} new matching files to download in {channel_name}.")
 
+        # Validate selected topic and exact message identities again immediately before starting
+        if allowed_message_ids is not None:
+            invalid_candidates = [
+                m.id for (m, fn, sz, tid, tt) in matching_messages
+                if m.id not in allowed_message_ids or (effective_topic_ids is not None and tid not in effective_topic_ids)
+            ]
+            if invalid_candidates:
+                self.emit("log", f"CRITICAL: Found invalid message candidates before starting: {invalid_candidates}. Aborting.")
+                return completed_count
+
         has_database_error = False
         for i, (msg, fname, fsize, t_id, t_title) in enumerate(matching_messages, 1):
             if self.cancel_flag: break
+            if allowed_message_ids is not None and msg.id not in allowed_message_ids:
+                self.emit("log", f"Skipping unapproved message ID {msg.id}.")
+                continue
+            if max_completed_files is not None and completed_count >= max_completed_files:
+                self.emit("log", f"Reached maximum completed files limit ({max_completed_files}). Halting download loop.")
+                break
+            if max_total_bytes is not None and downloaded_bytes_total + fsize > max_total_bytes:
+                self.emit("log", f"Reached maximum allowed download size limit ({max_total_bytes} bytes). Halting download loop.")
+                break
             if self.account_id and not self.db.is_selected(self.account_id, channel_id, peer_type):
                 self.emit("log", f"Stopping remaining downloads for {channel_name}: removed from Download List.")
                 break
@@ -1054,22 +1185,30 @@ class TelegramDownloaderEngine:
                     msg, channel_id, channel_folder, fname, fsize,
                     status_prefix=prefix,
                     is_forum=is_forum, topic_id=t_id, topic_title=t_title,
-                    channel_name=channel_name
+                    channel_name=channel_name,
+                    bytes_prior=downloaded_bytes_total,
+                    max_total_bytes=max_total_bytes
                 )
+                completed_count += 1
+                downloaded_bytes_total += fsize
             except FloodWaitError:
                 # Retry once after FloodWait sleep
                 await self.download_single_message(
                     msg, channel_id, channel_folder, fname, fsize,
                     status_prefix=prefix,
                     is_forum=is_forum, topic_id=t_id, topic_title=t_title,
-                    channel_name=channel_name
+                    channel_name=channel_name,
+                    bytes_prior=downloaded_bytes_total,
+                    max_total_bytes=max_total_bytes
                 )
+                completed_count += 1
+                downloaded_bytes_total += fsize
             except StorageError:
                 raise  # Halt whole process on storage missing/full
             except sqlite3.Error as sqle:
                 has_database_error = True
                 self.emit("log", f"CRITICAL DATABASE ERROR on message {msg.id}: {sqle}")
-                logger.critical(f"Database error on message {msg.id} in channel {channel_id}: {sqle}")
+                logger.critical(f"Database error on message {msg.id}: {sqle}")
                 self.emit("status", f"Halted channel {channel_name} due to database error: {sqle}")
                 break
             except Exception as e:
@@ -1090,11 +1229,234 @@ class TelegramDownloaderEngine:
         else:
             self.emit("log", f"Scan checkpoint NOT advanced for {channel_name} (cancelled by user).")
 
-    async def run_batch(self, selected_dialogs: List[Dict[str, Any]]):
+        return completed_count
+
+    async def run_batch(
+        self,
+        selected_dialogs: List[Dict[str, Any]],
+        target_topic_id: Optional[int] = None,
+        target_topic_ids: Optional[Union[Set[int], List[int]]] = None,
+        max_completed_files: Optional[int] = None,
+        expected_channel_id: Optional[int] = None,
+        expected_peer_type: Optional[str] = None,
+        expected_account_id: Optional[int] = None,
+        allowed_message_ids: Optional[List[int]] = None,
+        max_total_bytes: Optional[int] = None
+    ):
         """Runs batch download for given list of dialog entities."""
         self.is_downloading = True
         self.cancel_flag = False
         self.emit("download_started", None)
+
+        # Check if topic-specific download was requested
+        is_topic_request = (
+            target_topic_id is not None
+            or target_topic_ids is not None
+            or expected_channel_id is not None
+            or expected_peer_type is not None
+            or expected_account_id is not None
+        )
+
+        if is_topic_request:
+            # For topic-specific download requests, require all three composite identity fields
+            if (
+                expected_channel_id is None
+                or expected_peer_type is None
+                or not str(expected_peer_type).strip()
+                or expected_account_id is None
+            ):
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    "Scope violation: topic-specific download requires complete composite identity: "
+                    "expected_account_id, expected_peer_type, and expected_channel_id must all be provided."
+                )
+
+            # 1. Exactly one dialog is included
+            if len(selected_dialogs) != 1:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: topic-specific download requested for {expected_peer_type}_{expected_channel_id}, "
+                    f"but batch contains {len(selected_dialogs)} dialog entities (strictly 1 required)."
+                )
+
+            dialog_entry = selected_dialogs[0]
+
+            # 2. The selected channel ID matches the expected normalized channel ID
+            norm_expected_cid = normalize_channel_id(expected_channel_id)
+            dialog_cid = normalize_channel_id(dialog_entry["id"])
+            if dialog_cid != norm_expected_cid:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: selected dialog channel ID {dialog_cid} does not match "
+                    f"expected channel ID {norm_expected_cid}."
+                )
+
+            # 3. Peer type validation: topic-scoped downloads strictly require peer_type='channel'
+            expected_pt = str(expected_peer_type).strip().lower()
+            if expected_pt != "channel":
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: topic-scoped downloads strictly require expected_peer_type='channel', got '{expected_peer_type}'."
+                )
+
+            entity = dialog_entry.get("entity")
+            actual_entity_peer = None
+            if entity is not None:
+                if isinstance(entity, Channel):
+                    actual_entity_peer = "channel"
+                elif isinstance(entity, Chat):
+                    actual_entity_peer = "chat"
+                elif isinstance(entity, User):
+                    actual_entity_peer = "user"
+
+            if actual_entity_peer is not None and actual_entity_peer != "channel":
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: entity peer type '{actual_entity_peer}' does not match expected peer type 'channel'."
+                )
+
+            dialog_pt = dialog_entry.get("peer_type")
+            if dialog_pt is not None and str(dialog_pt).strip().lower() != "channel":
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: dialog peer type '{dialog_pt}' does not match expected peer type 'channel'."
+                )
+
+            # 4. The authenticated engine account matches the expected account ID
+            if self.account_id is None:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    "Scope violation: engine account is unauthenticated (missing account_id); "
+                    f"cannot verify expected_account_id {expected_account_id}."
+                )
+
+            try:
+                exp_acc_int = int(expected_account_id)
+                eng_acc_int = int(self.account_id)
+            except (ValueError, TypeError):
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError("Scope violation: non-integer account ID provided.")
+
+            if eng_acc_int != exp_acc_int:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: authenticated engine account ID {eng_acc_int} does not match "
+                    f"expected account ID {exp_acc_int}."
+                )
+
+            # 5. Telegram Entity Identity: require actual validated Channel entity with forum=True and megagroup=True
+            entity = dialog_entry.get("entity")
+            if entity is None and hasattr(self, "client") and self.client:
+                try:
+                    entity = await self.client.get_entity(norm_expected_cid)
+                    dialog_entry["entity"] = entity
+                except Exception as e:
+                    logger.warning(f"Could not resolve entity for {norm_expected_cid}: {e}")
+
+            if entity is None:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: missing or unresolvable Telegram entity for forum channel {norm_expected_cid}."
+                )
+
+            if not isinstance(entity, Channel):
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: entity for {norm_expected_cid} is not a Telegram Channel entity (got {type(entity).__name__})."
+                )
+
+            if not (getattr(entity, "forum", False) and getattr(entity, "megagroup", False)):
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: entity {norm_expected_cid} is not a genuine Telegram forum supergroup "
+                    f"(forum={getattr(entity, 'forum', False)}, megagroup={getattr(entity, 'megagroup', False)})."
+                )
+
+            if normalize_channel_id(entity.id) != norm_expected_cid:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: entity ID {entity.id} does not match expected channel {norm_expected_cid}."
+                )
+
+            # 6. Selected entity belongs to the authenticated session
+            has_selection = False
+            has_mapping = False
+            if self.db:
+                has_selection = bool(self.db.get_selection(eng_acc_int, norm_expected_cid, expected_pt))
+                has_mapping = bool(self.db.get_channel_storage_mapping(eng_acc_int, norm_expected_cid, expected_pt))
+            in_dialogs_cache = (expected_pt, norm_expected_cid) in self.dialogs_cache
+
+            if not (has_selection or has_mapping or in_dialogs_cache):
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: channel {norm_expected_cid} ({expected_pt}) does not belong to "
+                    f"authenticated account {eng_acc_int} session or persistent selections."
+                )
+
+            # 7. Topic ID selection and catalog verification
+            requested_topic_ids = set()
+            if target_topic_ids is not None:
+                requested_topic_ids.update(int(t) for t in target_topic_ids)
+            if target_topic_id is not None:
+                requested_topic_ids.add(int(target_topic_id))
+
+            # Mandatory: If target_topic_ids is empty, reject
+            if len(requested_topic_ids) == 0:
+                self.emit("log", "Scope violation: empty topic selection set provided to run_batch.")
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError("Scope violation: empty topic selection set provided for topic-scoped download.")
+
+            # Retrieve verified topic catalog using composite identity: (account_id, peer_type, channel_id)
+            known_topic_ids = set()
+            if self.db:
+                cached_db_topics = self.db.get_forum_topics(norm_expected_cid, account_id=eng_acc_int, peer_type=expected_pt)
+                known_topic_ids.update(t["topic_id"] for t in cached_db_topics)
+
+            cache_key = (eng_acc_int, expected_pt, norm_expected_cid)
+            if cache_key in self._forum_topics_cache:
+                known_topic_ids.update(self._forum_topics_cache[cache_key].keys())
+
+            if not known_topic_ids and entity is not None and hasattr(self, "client") and self.client:
+                try:
+                    fetched = await self.get_or_fetch_forum_topics(entity, norm_expected_cid, peer_type=expected_pt)
+                    known_topic_ids.update(fetched.keys())
+                except Exception as e:
+                    logger.warning(f"Could not fetch topics to validate scope: {e}")
+
+            # If verified topic catalog is missing or empty, reject and request a metadata refresh
+            if not known_topic_ids:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: verified topic catalog for forum supergroup {norm_expected_cid} "
+                    f"(account {eng_acc_int}, peer {expected_pt}) is missing or empty. "
+                    "A topic metadata refresh is required before downloading."
+                )
+
+            # If any requested topic ID is not in the verified forum's catalog, reject
+            alien_topics = requested_topic_ids - known_topic_ids
+            if alien_topics:
+                self.is_downloading = False
+                self.emit("download_ended", None)
+                raise ValueError(
+                    f"Scope violation: requested topic ID(s) {sorted(alien_topics)} do not belong to "
+                    f"verified forum supergroup {norm_expected_cid} (account {eng_acc_int}, peer {expected_pt})."
+                )
 
         # Validate storage before beginning
         valid, msg, _ = self.config_mgr.validate_storage()
@@ -1115,13 +1477,28 @@ class TelegramDownloaderEngine:
                 self.emit("log", f"Invalid cutoff date format: {date_str}. Ignoring.")
 
         total_channels = len(selected_dialogs)
+        completed_total = 0
         try:
             for idx, d in enumerate(selected_dialogs, 1):
                 if self.cancel_flag: break
-                await self.scan_and_download_channel(
+                remaining_limit = None
+                if max_completed_files is not None:
+                    remaining_limit = max(0, max_completed_files - completed_total)
+                    if remaining_limit <= 0:
+                        break
+                completed_in_channel = await self.scan_and_download_channel(
                     d["entity"], d["id"], d["name"], media_filters, cutoff_date,
-                    channel_idx=idx, total_channels=total_channels
+                    channel_idx=idx, total_channels=total_channels,
+                    target_topic_id=target_topic_id,
+                    target_topic_ids=target_topic_ids,
+                    max_completed_files=remaining_limit,
+                    allowed_message_ids=allowed_message_ids,
+                    max_total_bytes=max_total_bytes
                 )
+                if completed_in_channel:
+                    completed_total += completed_in_channel
+                if max_completed_files is not None and completed_total >= max_completed_files:
+                    break
         except StorageError as se:
             self.emit("log", f"DOWNLOAD ABORTED: {se}")
         except Exception as e:
