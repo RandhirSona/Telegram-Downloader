@@ -42,10 +42,44 @@ class ProcessLock:
             except (OSError, ProcessLookupError):
                 return False
 
+    def _get_pid_create_time(self, pid: int) -> int:
+        if pid <= 0:
+            return 0
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h_proc:
+                return 0
+            try:
+                creation_time = wintypes.FILETIME()
+                exit_time = wintypes.FILETIME()
+                kernel_time = wintypes.FILETIME()
+                user_time = wintypes.FILETIME()
+                if kernel32.GetProcessTimes(
+                    h_proc,
+                    ctypes.byref(creation_time),
+                    ctypes.byref(exit_time),
+                    ctypes.byref(kernel_time),
+                    ctypes.byref(user_time)
+                ):
+                    return (creation_time.dwHighDateTime << 32) | creation_time.dwLowDateTime
+                return 0
+            finally:
+                kernel32.CloseHandle(h_proc)
+        else:
+            try:
+                return int(os.stat(f"/proc/{pid}").st_ctime)
+            except Exception:
+                return 0
+
     def acquire_session_lock(self) -> bool:
         """
         Attempts to acquire exclusive session ownership for Telethon downloads.
         Returns True if acquired, False if another process holds active ownership.
+        An active process never loses its lock merely because its heartbeat is delayed.
         """
         now = time.time()
         if self.lock_path.exists():
@@ -53,14 +87,17 @@ class ProcessLock:
                 with open(self.lock_path, "r", encoding="utf-8") as f:
                     lock_info = json.load(f)
                 existing_pid = lock_info.get("pid", 0)
-                last_heartbeat = lock_info.get("last_heartbeat", 0)
+                lock_create_time = lock_info.get("create_time", 0)
 
-                # If process is still alive and heartbeat is recent (<30s)
-                if self._is_pid_alive(existing_pid) and (now - last_heartbeat < 30.0):
-                    logger.info(f"Lock active by PID {existing_pid} ({lock_info.get('role')})")
-                    return False
+                if self._is_pid_alive(existing_pid):
+                    proc_create_time = self._get_pid_create_time(existing_pid)
+                    if lock_create_time and proc_create_time and proc_create_time != lock_create_time:
+                        logger.warning(f"Clearing stale lock: PID {existing_pid} was reused by another process.")
+                    else:
+                        logger.info(f"Lock active by live owner PID {existing_pid} ({lock_info.get('role')})")
+                        return False
                 else:
-                    logger.warning(f"Clearing stale lock from dead/unresponsive PID {existing_pid}")
+                    logger.warning(f"Clearing stale lock from dead PID {existing_pid}")
             except Exception as e:
                 logger.warning(f"Corrupt lock file found, will overwrite: {e}")
 
@@ -69,7 +106,8 @@ class ProcessLock:
             "pid": os.getpid(),
             "role": self.role,
             "acquired_at": now,
-            "last_heartbeat": now
+            "last_heartbeat": now,
+            "create_time": self._get_pid_create_time(os.getpid())
         }
         try:
             with open(self.lock_path, "w", encoding="utf-8") as f:
@@ -130,8 +168,9 @@ class ProcessLock:
             role = lock_info.get("role", "")
             last_heartbeat = lock_info.get("last_heartbeat", 0)
             
-            # Check if alive and heartbeat fresh within 20s
-            if time.time() - last_heartbeat > 20.0:
+            # Check if alive
+            lock = cls()
+            if not lock._is_pid_alive(pid):
                 return None
 
             with open(STATUS_FILE, "r", encoding="utf-8") as f:

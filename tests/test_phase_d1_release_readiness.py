@@ -113,35 +113,65 @@ class TestPhaseD1ReleaseReadiness(unittest.TestCase):
             self.assertTrue(app.engine.cancel_flag)
             self.assertFalse(app.lock.is_owner)
 
-    # 2. Stale lock recovery
+    # 2. Safe stale lock recovery & active process protection
     def test_02_stale_lock_recovery(self):
         lock_file = self.test_path / "downloader.lock"
         status_file = self.test_path / "worker_status.json"
 
         with patch("instance_lock.LOCK_FILE", lock_file), \
              patch("instance_lock.STATUS_FILE", status_file):
-            # Write a stale lock with dead PID and expired timestamp
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Scenario A: Dead owner -> cleanly reclaimed
             stale_data = {
-                "pid": 99999999,  # definitely non-existent PID
+                "pid": 99999999,  # non-existent PID
                 "role": "worker",
                 "acquired_at": time.time() - 3600,
-                "last_heartbeat": time.time() - 100
+                "last_heartbeat": time.time() - 100,
+                "create_time": 11111
             }
-            lock_file.parent.mkdir(parents=True, exist_ok=True)
             with open(lock_file, "w", encoding="utf-8") as f:
                 json.dump(stale_data, f)
 
             lock = ProcessLock(role="gui")
             self.assertTrue(lock.acquire_session_lock())
             self.assertTrue(lock.is_owner)
-
-            with open(lock_file, "r", encoding="utf-8") as f:
-                active_info = json.load(f)
-            self.assertEqual(active_info["pid"], os.getpid())
-            self.assertEqual(active_info["role"], "gui")
             lock.release_lock()
 
-    # 3. Duplicate instance prevention
+            # Scenario B: Live owner with delayed heartbeat (>30s) -> NEVER stolen
+            my_pid = os.getpid()
+            my_create_time = lock._get_pid_create_time(my_pid)
+            delayed_data = {
+                "pid": my_pid,
+                "role": "worker",
+                "acquired_at": time.time() - 3600,
+                "last_heartbeat": time.time() - 60,  # 60s ago (>30s delayed!)
+                "create_time": my_create_time
+            }
+            with open(lock_file, "w", encoding="utf-8") as f:
+                json.dump(delayed_data, f)
+
+            new_gui_lock = ProcessLock(role="gui")
+            # Must NOT steal the lock from an active process!
+            self.assertFalse(new_gui_lock.acquire_session_lock())
+            self.assertFalse(new_gui_lock.is_owner)
+
+            # Scenario C: PID reuse -> PID is alive but belongs to a new process (different create_time)
+            reused_data = {
+                "pid": my_pid,
+                "role": "worker",
+                "acquired_at": time.time() - 3600,
+                "last_heartbeat": time.time() - 100,
+                "create_time": my_create_time - 999999  # mismatched create_time
+            }
+            with open(lock_file, "w", encoding="utf-8") as f:
+                json.dump(reused_data, f)
+
+            self.assertTrue(new_gui_lock.acquire_session_lock())
+            self.assertTrue(new_gui_lock.is_owner)
+            new_gui_lock.release_lock()
+
+    # 3. Duplicate instance prevention and monitoring mode fallback
     def test_03_duplicate_instance_prevention(self):
         lock_file = self.test_path / "downloader.lock"
         status_file = self.test_path / "worker_status.json"
@@ -151,9 +181,18 @@ class TestPhaseD1ReleaseReadiness(unittest.TestCase):
             lock1 = ProcessLock(role="worker")
             self.assertTrue(lock1.acquire_session_lock())
 
+            # Worker writes status
+            lock1.update_status({"status": "RUNNING", "current_channel": "TestChannel"})
+
+            # Second process cannot acquire lock
             lock2 = ProcessLock(role="gui")
             self.assertFalse(lock2.acquire_session_lock())
             self.assertFalse(lock2.is_owner)
+
+            # Worker status is detected for monitoring mode even if heartbeat delayed
+            active_worker = ProcessLock.get_active_worker_status()
+            self.assertIsNotNone(active_worker)
+            self.assertEqual(active_worker["current_channel"], "TestChannel")
 
             lock1.release_lock()
             self.assertTrue(lock2.acquire_session_lock())

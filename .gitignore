@@ -71,6 +71,7 @@ scratch/
 *CHECKLIST*.md
 *BENCHMARK*.md
 *RESULTS*.json
+!docs/reports/*.md
 benchmark_results.json
 single_download_benchmark_results.json
 app/
