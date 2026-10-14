@@ -3,7 +3,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Telethon 1.43.2](https://img.shields.io/badge/telethon-1.43.2-blue.svg)](https://github.com/LonamiWebs/Telethon)
 [![Platform Windows](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey.svg)](https://microsoft.com/windows)
-[![Tests Passing](https://img.shields.io/badge/tests-162%20passed-brightgreen.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-174%20passed-brightgreen.svg)]()
 [![License MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 An enterprise-grade, high-reliability Telegram media downloader designed for seamless batch media acquisition, unattended 24/7 background operation, and intelligent forum topic subfolder routing on Windows.
@@ -328,7 +328,8 @@ The project includes an isolated unit test suite covering authentication mocks, 
 - 20 / 20 Stage B Topic Routing & Navigation Tests Passed
 - 35 / 35 Composite Identity & Safety Guard Tests Passed
 - 22 / 22 Forum Topic Browser GUI Tests Passed
-- 162 / 162 Total Unit Tests Passed (0 Regressions)
+- 12 / 12 Phase D1 Release-Readiness, Security & Stability Tests Passed
+- 174 / 174 Total Unit Tests Passed (0 Regressions)
 
 ---
 

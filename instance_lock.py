@@ -31,6 +31,9 @@ class ProcessLock:
             if process != 0:
                 kernel32.CloseHandle(process)
                 return True
+            ERROR_ACCESS_DENIED = 5
+            if kernel32.GetLastError() == ERROR_ACCESS_DENIED:
+                return True
             return False
         else:
             try:

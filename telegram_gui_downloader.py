@@ -77,7 +77,8 @@ class TelegramGUIApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Telegram Downloader - Proxmox Storage Edition")
-        self.root.geometry("1080x780")
+        self.root.geometry("1100x800")
+        self.root.minsize(1050, 750)
 
         self.config_mgr = ConfigManager()
         self.db = DownloadTrackerDB()
@@ -1865,9 +1866,20 @@ class TelegramGUIApp:
             except Exception:
                 pass
             self._after_id = None
-        if self.engine and self.engine.client:
+        if self.engine:
+            self.engine.cancel_flag = True
+            if self.engine.client and hasattr(self, "loop") and self.loop and self.loop.is_running():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(self.engine.client.disconnect(), self.loop)
+                    try:
+                        future.result(timeout=1.0)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        if hasattr(self, "loop") and self.loop and self.loop.is_running():
             try:
-                asyncio.run_coroutine_threadsafe(self.engine.client.disconnect(), self.loop)
+                self.loop.call_soon_threadsafe(self.loop.stop)
             except Exception:
                 pass
         self.lock.release_lock()

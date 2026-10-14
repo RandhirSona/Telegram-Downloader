@@ -54,8 +54,16 @@ def sanitize_filename(name: str) -> str:
 def sanitize_media_filename(name: str) -> str:
     name = str(name or "")
     name = re.sub(r'[\\/*?:"<>|]', "_", name).strip()
+    name = re.sub(r'\.{2,}', '_', name)
     name = re.sub(r'\s+', ' ', name)
     name = re.sub(r'^\.+', '', name)
+    reserved = {"CON", "PRN", "AUX", "NUL",
+                "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
+    prefix = name.split('.')[0]
+    if prefix.upper() in reserved:
+        rest = name[len(prefix):]
+        name = f"{prefix}_file{rest}"
     return name[:220] or "unnamed_file"
 
 def format_size(n) -> str:
