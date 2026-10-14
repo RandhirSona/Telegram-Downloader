@@ -6,7 +6,7 @@ This document details the architectural enhancements implemented to support dyna
 
 ## 1. Storage Architecture Overview
 
-The Telegram Downloader decouples application execution (`C:\TelegramData`) from media storage (2 TB dedicated volume):
+The Telegram Downloader decouples application execution (`C:\TelegramData`) from media storage (user-configurable storage volume):
 
 - **Configurable Drive Letter:** The application makes no assumptions about drive letters (`D:`, `E:`, `M:`, or UNC network paths).
 - **Persistent Storage Record:** Stored in `config.json` under `"download_directory"`.

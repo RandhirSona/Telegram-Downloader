@@ -1,5 +1,6 @@
 import os
 import sys
+import errno
 import asyncio
 import logging
 import re
@@ -662,6 +663,29 @@ class TelegramDownloaderEngine:
         # Fallback to Unclassified if General topic does not exist or is closed
         return None, "Unclassified"
 
+    def find_file_across_roots(self, rel_path: str) -> Optional[Path]:
+        """
+        Locates an existing file by relative path across active and historical download roots.
+        Returns Path if found and exists on disk, else None.
+        """
+        try:
+            active_root = self.config_mgr.get_download_dir()
+            active_file = active_root / rel_path
+            if active_file.exists():
+                return active_file
+        except Exception:
+            pass
+
+        if hasattr(self.config_mgr, "get_historical_roots"):
+            for hist_root in self.config_mgr.get_historical_roots():
+                try:
+                    hist_file = hist_root / rel_path
+                    if hist_file.exists():
+                        return hist_file
+                except Exception:
+                    continue
+        return None
+
     def resolve_destination_path(
         self,
         channel_id: int,
@@ -676,7 +700,7 @@ class TelegramDownloaderEngine:
         message_date: Optional[datetime] = None,
         expected_size: int = 0
     ) -> Tuple[Path, str, Optional[int], Optional[str]]:
-        """
+        r"""
         Central destination-path resolver for both GUI and headless worker downloads.
         
         Structure:
@@ -709,6 +733,12 @@ class TelegramDownloaderEngine:
                 elif historical_target.exists():
                     logger.info(f"Preserving existing historical target path for message {message_id}: {historical_target}")
                     return historical_target, rel, rec_dict.get("topic_id"), rec_dict.get("topic_title")
+                else:
+                    # Check across historical roots if not present on active root
+                    hist_found = self.find_file_across_roots(rel)
+                    if hist_found and hist_found.exists():
+                        logger.info(f"Preserving existing file on historical root for message {message_id}: {hist_found}")
+                        return hist_found, rel, rec_dict.get("topic_id"), rec_dict.get("topic_title")
 
         # 2. Determine Channel Folder
         if channel_folder is not None:
@@ -833,8 +863,9 @@ class TelegramDownloaderEngine:
 
         # 1. Check duplicate state in DB
         if self.db.is_message_downloaded(channel_id, message.id):
-            if target_path.exists() and (expected_size == 0 or target_path.stat().st_size == expected_size):
-                self.emit("log", f"Skipped (already in DB & on disk): {target_path.name}")
+            existing_match = self.find_file_across_roots(rel_path)
+            if existing_match and existing_match.exists() and (expected_size == 0 or existing_match.stat().st_size == expected_size):
+                self.emit("log", f"Skipped (already in DB & on disk): {existing_match.name}")
                 return
 
         # 2. Check if file already exists with verified message timestamp metadata
@@ -1002,6 +1033,28 @@ class TelegramDownloaderEngine:
                 self.emit("status", f"Rate limited. Pausing for {fwe.seconds}s...")
                 await asyncio.sleep(fwe.seconds)
                 raise fwe
+
+            except (IOError, OSError) as e:
+                # Check for storage detachment or out-of-space during active transfer
+                is_storage_fault = (
+                    getattr(e, 'errno', None) in (errno.ENOSPC, errno.ENOENT) or
+                    not self.config_mgr.validate_storage()[0]
+                )
+                if is_storage_fault:
+                    se = StorageError(f"Storage became unavailable during transfer: {e}")
+                    self.emit("log", f"STORAGE HALT: {se}")
+                    self.emit("storage_error", str(se))
+                    self.db.record_failed(channel_id, message.id, str(se))
+                    raise se
+
+                self.emit("log", f"Download failed for {target_path.name}: {e}")
+                if part_path.exists():
+                    try:
+                        part_path.unlink()
+                    except OSError:
+                        pass
+                self.db.record_failed(channel_id, message.id, str(e))
+                raise e
 
             except Exception as e:
                 self.emit("log", f"Download failed for {target_path.name}: {e}")

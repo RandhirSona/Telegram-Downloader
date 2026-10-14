@@ -436,22 +436,37 @@ class TelegramGUIApp:
         self.main_frame = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.main_frame, text="Downloader & Logs")
 
-        # Storage Bar
-        storage_frame = ttk.LabelFrame(self.main_frame, text="Storage Destination (2 TB Drive)", padding=10)
+        # Download Location Bar
+        storage_frame = ttk.LabelFrame(self.main_frame, text="Download Location", padding=10)
         storage_frame.pack(fill=tk.X, pady=(0, 10))
 
+        top_storage_frame = ttk.Frame(storage_frame)
+        top_storage_frame.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(top_storage_frame, text="Directory:").pack(side=tk.LEFT, padx=(0, 5))
         self.storage_path_var = tk.StringVar(value=self.config_mgr.config.get("download_directory", ""))
-        self.storage_entry = ttk.Entry(storage_frame, textvariable=self.storage_path_var, width=60)
+        self.storage_entry = ttk.Entry(top_storage_frame, textvariable=self.storage_path_var, width=50)
         self.storage_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
-        btn_browse = ttk.Button(storage_frame, text="Browse...", command=self.on_browse_storage)
+        btn_browse = ttk.Button(top_storage_frame, text="Browse...", command=self.on_browse_storage)
         btn_browse.pack(side=tk.LEFT, padx=(0, 5))
 
-        btn_validate = ttk.Button(storage_frame, text="Check Space", command=self.update_storage_display)
-        btn_validate.pack(side=tk.LEFT, padx=(0, 10))
+        self.btn_save_storage = ttk.Button(top_storage_frame, text="Save / Apply", command=self.on_save_storage)
+        self.btn_save_storage.pack(side=tk.LEFT, padx=(0, 5))
+
+        btn_validate = ttk.Button(top_storage_frame, text="Check Space", command=self.update_storage_display)
+        btn_validate.pack(side=tk.LEFT, padx=(0, 5))
+
+        info_storage_frame = ttk.Frame(storage_frame)
+        info_storage_frame.pack(fill=tk.X)
+
+        active_dir_val = self.config_mgr.config.get("download_directory", "")
+        self.active_path_var = tk.StringVar(value=f"Active Path: {active_dir_val if active_dir_val else '(None)'}")
+        self.lbl_active_path = ttk.Label(info_storage_frame, textvariable=self.active_path_var, font=("Helvetica", 9))
+        self.lbl_active_path.pack(side=tk.LEFT, padx=(0, 15))
 
         self.storage_status_var = tk.StringVar(value="Storage: Unknown")
-        self.lbl_storage_status = ttk.Label(storage_frame, textvariable=self.storage_status_var, font=("Helvetica", 9, "bold"))
+        self.lbl_storage_status = ttk.Label(info_storage_frame, textvariable=self.storage_status_var, font=("Helvetica", 9, "bold"))
         self.lbl_storage_status.pack(side=tk.LEFT)
 
         # Settings
@@ -1605,20 +1620,80 @@ class TelegramGUIApp:
             self.lbl_storage_status.config(foreground="red")
             return
 
-        valid, msg, metrics = self.config_mgr.validate_storage(target)
+        valid, msg, metrics = self.config_mgr.validate_storage(target, create_if_missing=False)
         if valid:
             self.storage_status_var.set(f"Free: {metrics['free_gb']:.1f} GB / {metrics['total_gb']:.1f} GB (Ready)")
             self.lbl_storage_status.config(foreground="green")
-            self.config_mgr.save_config({"download_directory": target})
+            active_dir = self.config_mgr.config.get("download_directory", "")
+            if active_dir:
+                self.active_path_var.set(f"Active Path: {active_dir}")
         else:
             self.storage_status_var.set(f"ERROR: {msg}")
             self.lbl_storage_status.config(foreground="red")
 
     def on_browse_storage(self):
-        chosen = filedialog.askdirectory(title="Select 2 TB Storage Destination Folder")
+        chosen = filedialog.askdirectory(title="Select Download Storage Directory")
         if chosen:
             self.storage_path_var.set(chosen)
             self.update_storage_display()
+
+    def on_save_storage(self):
+        # Prevent changing download root during active transfers
+        if self.engine and self.engine.is_downloading:
+            messagebox.showwarning(
+                "Download In Progress",
+                "Cannot change the download directory while downloads are actively running.\n\n"
+                "Please stop active transfers before changing the download directory."
+            )
+            return
+
+        target = self.storage_path_var.get().strip()
+        if not target:
+            self.storage_status_var.set("Storage: NONE SELECTED (Required)")
+            self.lbl_storage_status.config(foreground="red")
+            messagebox.showerror("Invalid Storage", "Please select or enter a valid download directory.")
+            return
+
+        target_path = Path(os.path.normpath(target))
+
+        # Check if directory exists; if not, ask user approval for safe creation
+        if not target_path.exists():
+            confirm = messagebox.askyesno(
+                "Create Directory",
+                f"The directory:\n\n{target}\n\ndoes not exist. Would you like to create it?",
+                icon="question"
+            )
+            if not confirm:
+                self.storage_status_var.set(f"ERROR: Directory does not exist: {target}")
+                self.lbl_storage_status.config(foreground="red")
+                return
+
+        # Check if user explicitly selected C: system drive -> warning confirmation
+        if target_path.drive.upper() == "C:":
+            confirm_c = messagebox.askyesno(
+                "System Drive Warning (C:)",
+                f"You have selected a storage directory on your system drive (C:):\n\n{target}\n\n"
+                "Telegram downloads can consume significant disk space. "
+                "Are you sure you want to use this location on the C: drive?",
+                icon="warning"
+            )
+            if not confirm_c:
+                return
+
+        # Validate storage with safe creation approved
+        valid, msg, metrics = self.config_mgr.validate_storage(target, create_if_missing=True)
+        if valid:
+            resolved = self.config_mgr.set_download_dir(target)
+            self.active_path_var.set(f"Active Path: {resolved}")
+            self.storage_path_var.set(str(resolved))
+            self.storage_status_var.set(f"Free: {metrics['free_gb']:.1f} GB / {metrics['total_gb']:.1f} GB (Ready)")
+            self.lbl_storage_status.config(foreground="green")
+            self.log(f"INFO: Download location successfully changed to: {resolved}")
+            messagebox.showinfo("Storage Applied", f"Download directory set to:\n{resolved}\n\nFuture downloads will be saved here.")
+        else:
+            self.storage_status_var.set(f"ERROR: {msg}")
+            self.lbl_storage_status.config(foreground="red")
+            messagebox.showerror("Invalid Storage", f"Storage validation failed:\n{msg}")
 
     def on_save_settings(self):
         filters = {k: v.get() for k, v in self.media_vars.items()}

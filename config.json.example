@@ -1,5 +1,6 @@
 {
   "download_directory": "D:\\TelegramDownloads",
+  "historical_download_directories": [],
   "min_free_space_gb": 5.0,
   "scan_interval_minutes": 15,
   "active_channels": [],

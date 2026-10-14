@@ -142,10 +142,13 @@ Copy-Item config.json.example config.json
    ```
 
 ### 6. Configure Download Storage
-Open `config.json` and set your desired download directory:
+
+You can configure the download storage directly from the Tkinter GUI or via `config.json`:
+
 ```json
 {
   "download_directory": "D:\\TelegramDownloads",
+  "historical_download_directories": [],
   "min_free_space_gb": 5.0,
   "scan_interval_minutes": 15,
   "concurrent_downloads": 2,
@@ -161,6 +164,26 @@ Open `config.json` and set your desired download directory:
   "cutoff_date": ""
 }
 ```
+
+#### Choosing and Changing the Download Location
+- **In the GUI ("Downloader & Logs" Tab):**
+  1. Click **Browse...** to select any folder on any local drive or mapped network share.
+  2. Click **Save / Apply** to validate and persist the directory.
+  3. If the selected folder does not exist, the application will prompt for confirmation before safely creating it.
+  4. If a folder on the system drive (`C:`) is chosen, the application presents a confirmation prompt explaining the disk usage implications.
+  5. The active path is immediately displayed, and changes persist across application restarts.
+- **Changing Storage Locations Safely:**
+  - Changing the storage location applies exclusively to **future downloads**.
+  - **No automated moving or renaming:** Existing downloaded media remains untouched on the original drive/folder.
+  - **Zero duplicate downloads:** Previously completed downloads recorded in SQLite are recognized and will never be re-downloaded to the new location.
+  - **Partial files protected:** In-progress `.part` files on previous storage locations remain associated with their original directory and are never guessed or corrupted under the new root.
+  - **Active transfer guard:** Root changes are prohibited while transfers are active. Stop active transfers before applying a new directory.
+- **Handling Disconnected or Missing Drives:**
+  - Both the desktop GUI and headless background worker validate storage availability before every transfer and during chunk writing.
+  - If a configured drive is detached, unmounted, or full, transfers halt safely with a clear notification.
+  - **Zero silent fallback:** The application will **never** silently fall back to `C:\` or any unexpected directory.
+- **No Dedicated 2 TB Drive Requirement:**
+  - Any storage drive, partition, external disk, or SMB network share with sufficient free space can be used. No specific drive letter, disk size, or volume label is required.
 
 ### 7. Launch the Application
 To launch the desktop GUI:

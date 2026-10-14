@@ -59,7 +59,7 @@ echo.
 echo ========================================================
 echo   Setup Complete!
 echo   1. Edit .env with your Telegram credentials.
-echo   2. Run start_downloader.bat to launch GUI and select your 2 TB drive.
+echo   2. Run start_downloader.bat to launch GUI and select your download storage folder.
 echo ========================================================
 echo.
 pause

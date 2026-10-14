@@ -10,7 +10,7 @@ This document provides complete instructions for deploying, configuring, and mai
 - **Guest OS:** Windows 10, Windows 11, or Windows Server 2019/2022 (64-bit)
 - **CPU / RAM:** 2 vCPUs, 4 GB RAM recommended
 - **Operating Storage:** 20 GB free on `C:\` for OS and Python environment
-- **Media Storage:** Dedicated 2 TB virtual disk (VirtIO SCSI) or mapped SMB/NFS share (e.g. `D:\`, `E:\`, or `\\192.168.1.4\Media`)
+- **Media Storage:** Any dedicated or shared virtual disk (VirtIO SCSI), external drive, or mapped SMB/NFS share (e.g. `D:\`, `E:\`, or `\\192.168.1.4\Media`)
 - **Python Version:** Python 3.10 to 3.12 (64-bit) with `Add Python to PATH` enabled
 
 ---
@@ -20,7 +20,7 @@ This document provides complete instructions for deploying, configuring, and mai
 ### Option A: VirtIO SCSI Virtual Disk (Fastest)
 1. In Proxmox VE, select your Windows VM.
 2. Navigate to **Hardware** -> **Add** -> **Hard Disk**.
-3. Bus/Device: `VirtIO SCSI`. Size: `2000 GiB` (2 TB).
+3. Bus/Device: `VirtIO SCSI`. Size: Choose any disk size according to your media storage needs.
 4. Inside Windows Disk Management (`diskmgmt.msc`):
    - Initialize disk as **GPT**.
    - Create a Simple Volume formatted as **NTFS** with default allocation unit size.
@@ -64,10 +64,10 @@ This document provides complete instructions for deploying, configuring, and mai
 
 ## 5. Storage Configuration
 
-1. In the **Storage Destination** bar at the top of the GUI:
-   - Click **Browse...** and select your 2 TB drive (e.g. `D:\TelegramDownloads`).
-   - Click **Check Space**.
-   - Confirm the badge shows green: `Free: 1.84 TB / 2.00 TB (Ready)`.
+1. In the **Download Location** bar at the top of the GUI:
+   - Click **Browse...** and select your chosen storage folder (e.g. `D:\TelegramDownloads`).
+   - Click **Save / Apply** to save and validate the folder.
+   - Confirm the badge shows green: `Free: ... GB / ... GB (Ready)`.
 2. Check your desired channels from the left list.
 3. Choose your media types (PDFs, Videos, etc.) and optional cutoff date.
 4. Click **Save Active Channels**.
@@ -78,7 +78,7 @@ This document provides complete instructions for deploying, configuring, and mai
 
 | Symptom | Root Cause | Solution |
 |---|---|---|
-| `Storage: NONE SELECTED` | Storage path not chosen | Click Browse and select your 2 TB volume. |
-| `STORAGE HALT: Storage unreachable` | 2 TB disk unmounted or disconnected | Verify drive letter in Disk Management / File Explorer. Downloader halts safely without writing to C:. |
+| `Storage: NONE SELECTED` | Storage path not chosen | Click Browse and select your storage volume. |
+| `STORAGE HALT: Storage unreachable` | Storage disk unmounted or disconnected | Verify drive letter or share in File Explorer. Downloader halts safely without writing to C:. |
 | `Rate limited. Pausing for Xs...` | Telegram FloodWait triggered | Normal behavior. Engine automatically waits for countdown to expire before resuming. |
 | `Another instance is running` | Worker or previous GUI instance active | Check Task Manager or `app_data\downloader.lock`. GUI opens in Monitoring Mode automatically if worker is active. |

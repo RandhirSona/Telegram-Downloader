@@ -1,13 +1,13 @@
 # Windows VM Setup Guide - Telegram Downloader
 
 ## Overview
-This guide describes how to install and run the Telegram Downloader on a Windows VM hosted under Proxmox, storing downloads on a dedicated 2 TB storage drive.
+This guide describes how to install and run the Telegram Downloader on a Windows VM hosted under Proxmox, storing downloads on any user-configurable storage volume.
 
 ---
 
 ## Architecture & Paths
 - **VM Application Directory:** `C:\TelegramData`
-- **VM Target Storage:** Dynamic (e.g. `D:\TelegramDownloads`, `E:\TelegramMedia`, or network share `\\Storage\Media`)
+- **VM Target Storage:** User-Configurable (e.g. `D:\TelegramDownloads`, `E:\TelegramMedia`, external disk, or network share `\\Storage\Media`)
 
 ---
 
@@ -60,16 +60,17 @@ This guide describes how to install and run the Telegram Downloader on a Windows
    - Enter your phone number and click **Send Code**.
    - Enter the OTP code sent to your official Telegram app.
    - Enter your 2FA password if prompted.
-4. Once authenticated, switch to the **Downloader** tab:
-   - Look at the **Storage Destination** bar at the top.
-   - Click **Browse...** and select your 2 TB drive or folder (e.g. `D:\TelegramDownloads` or your mapped share).
-   - Click **Check Space** to verify write access and live disk usage (e.g. `Free: 1.84 TB / 2.00 TB (Ready)`).
+4. Once authenticated, switch to the **Downloader & Logs** tab:
+   - Look at the **Download Location** bar at the top.
+   - Click **Browse...** and select your chosen storage drive or folder (e.g. `D:\TelegramDownloads` or your mapped share).
+   - Click **Save / Apply** to validate and persist the directory.
+   - Click **Check Space** to verify write access and live disk usage.
 5. Select your target channels/groups and preferred media filters (PDFs, Videos, etc.).
 6. Click **Save Active Channels** to save this selection for automated 24/7 background downloading.
 
 ---
 
 ## Step 5: Verification & Safety Guarantees
-- **No-C:-Fallback Guard:** If your 2 TB drive is ever detached or full, the downloader halts immediately. It will **never** silently write large files to your `C:\` system drive.
+- **No-C:-Fallback Guard:** If your configured storage drive is ever detached or full, the downloader halts immediately. It will **never** silently write large files to your `C:\` system drive.
 - **Atomic Downloads:** In-progress transfers write to `.part` files. Only 100% verified complete files are promoted to final filenames.
 - **Duplicate Protection:** Media is tracked by Telegram channel ID and message ID in `download_tracker.db`.
