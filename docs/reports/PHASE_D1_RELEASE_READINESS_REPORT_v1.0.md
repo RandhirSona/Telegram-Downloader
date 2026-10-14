@@ -3,6 +3,7 @@
 **Date:** 2026-10-14  
 **Application:** Telegram Downloader (Windows 11 Pro VM on Proxmox)  
 **Deliverable Document:** `docs/reports/PHASE_D1_RELEASE_READINESS_REPORT_v1.0.md`  
+**Local Commit SHA:** `64b3342cefd9f0b1820b22a07c9b88939b4b00ce`  
 **Remote `origin/main` SHA:** `2ad11a3ff631d0775bc4f561ed9609956cdbed87`  
 **Overall Release Readiness Assessment:** **READY**
 
