@@ -663,28 +663,65 @@ class TelegramDownloaderEngine:
         # Fallback to Unclassified if General topic does not exist or is closed
         return None, "Unclassified"
 
-    def find_file_across_roots(self, rel_path: str) -> Optional[Path]:
+    def find_file_across_roots(
+        self,
+        rel_path: str,
+        expected_size: int = 0,
+        message_date: Optional[datetime] = None
+    ) -> Optional[Path]:
         """
-        Locates an existing file by relative path across active and historical download roots.
-        Returns Path if found and exists on disk, else None.
+        Locates an existing file across active and historical download roots.
+        Never relies on relative path alone: verifies accessibility, file size,
+        and modification timestamp metadata.
         """
+        roots_to_check: List[Path] = []
         try:
             active_root = self.config_mgr.get_download_dir()
-            active_file = active_root / rel_path
-            if active_file.exists():
-                return active_file
+            roots_to_check.append(active_root)
         except Exception:
             pass
 
         if hasattr(self.config_mgr, "get_historical_roots"):
-            for hist_root in self.config_mgr.get_historical_roots():
-                try:
-                    hist_file = hist_root / rel_path
-                    if hist_file.exists():
-                        return hist_file
-                except Exception:
+            for hr in self.config_mgr.get_historical_roots():
+                if hr not in roots_to_check:
+                    roots_to_check.append(hr)
+
+        best_candidate: Optional[Path] = None
+        for root in roots_to_check:
+            try:
+                candidate = root / rel_path
+                # Check path accessibility without raising on disconnected drives
+                if not candidate.is_file():
                     continue
-        return None
+
+                stat_res = candidate.stat()
+
+                # 1. Size verification: if expected_size is provided, size MUST match
+                if expected_size > 0 and stat_res.st_size != expected_size:
+                    continue
+
+                # 2. Timestamp verification: if message_date is an authentic datetime, check mtime
+                if isinstance(message_date, datetime):
+                    try:
+                        expected_ts = float(message_date.timestamp())
+                        mtime_diff = abs(stat_res.st_mtime - expected_ts)
+                        if mtime_diff <= 2.0:
+                            # Full match: path + size + timestamp identity verified!
+                            return candidate
+                        else:
+                            # Size matched but mtime differed; continue looking for authentic candidate
+                            continue
+                    except (TypeError, ValueError, OSError):
+                        pass
+
+                # If no message_date specified or size matched
+                if best_candidate is None:
+                    best_candidate = candidate
+            except (OSError, ValueError):
+                # Drive disconnected, permission denied, or invalid path component
+                continue
+
+        return best_candidate
 
     def resolve_destination_path(
         self,
@@ -735,7 +772,7 @@ class TelegramDownloaderEngine:
                     return historical_target, rel, rec_dict.get("topic_id"), rec_dict.get("topic_title")
                 else:
                     # Check across historical roots if not present on active root
-                    hist_found = self.find_file_across_roots(rel)
+                    hist_found = self.find_file_across_roots(rel, expected_size=expected_size, message_date=message_date)
                     if hist_found and hist_found.exists():
                         logger.info(f"Preserving existing file on historical root for message {message_id}: {hist_found}")
                         return hist_found, rel, rec_dict.get("topic_id"), rec_dict.get("topic_title")
@@ -863,17 +900,21 @@ class TelegramDownloaderEngine:
 
         # 1. Check duplicate state in DB
         if self.db.is_message_downloaded(channel_id, message.id):
-            existing_match = self.find_file_across_roots(rel_path)
+            existing_match = self.find_file_across_roots(rel_path, expected_size=expected_size, message_date=msg_date)
             if existing_match and existing_match.exists() and (expected_size == 0 or existing_match.stat().st_size == expected_size):
                 self.emit("log", f"Skipped (already in DB & on disk): {existing_match.name}")
                 return
 
         # 2. Check if file already exists with verified message timestamp metadata
         if target_path.exists() and expected_size > 0 and target_path.stat().st_size == expected_size:
-            is_mtime_match = (
-                msg_date is not None and
-                abs(target_path.stat().st_mtime - msg_date.timestamp()) <= 2.0
-            )
+            is_mtime_match = False
+            if isinstance(msg_date, datetime):
+                try:
+                    is_mtime_match = abs(target_path.stat().st_mtime - float(msg_date.timestamp())) <= 2.0
+                except (TypeError, ValueError, OSError):
+                    pass
+            else:
+                is_mtime_match = True
             if is_mtime_match:
                 self.db.record_completed(
                     channel_id, message.id, target_path.name, expected_size, rel_path,

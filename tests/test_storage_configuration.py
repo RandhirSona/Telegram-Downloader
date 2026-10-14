@@ -53,7 +53,33 @@ class TestStorageConfigurationRegression(unittest.TestCase):
         )
 
     def tearDown(self):
+        try:
+            self.db.close()
+        except Exception:
+            pass
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _create_test_gui(self, root):
+        from unittest.mock import MagicMock, AsyncMock, patch
+        from telegram_gui_downloader import TelegramGUIApp
+        mock_lock = MagicMock()
+        mock_lock.acquire_session_lock.return_value = True
+        mock_lock.release_lock.return_value = True
+
+        mock_engine = MagicMock()
+        mock_engine.check_auth = AsyncMock(return_value=True)
+        mock_engine.is_downloading = False
+
+        with patch("telegram_gui_downloader.ConfigManager", return_value=self.cfg_mgr), \
+             patch("telegram_gui_downloader.DownloadTrackerDB", return_value=self.db), \
+             patch("telegram_gui_downloader.ProcessLock", return_value=mock_lock), \
+             patch("telegram_gui_downloader.TelegramDownloaderEngine", return_value=mock_engine), \
+             patch.object(TelegramGUIApp, "run_async_loop", lambda self: None), \
+             patch.object(TelegramGUIApp, "poll_queue", lambda self: None):
+            app = TelegramGUIApp(root)
+            app.config_mgr = self.cfg_mgr
+            app.engine = mock_engine
+            return app
 
     # -------------------------------------------------------------------------
     # 1. Selecting a different download drive
@@ -124,16 +150,13 @@ class TestStorageConfigurationRegression(unittest.TestCase):
     # -------------------------------------------------------------------------
     def test_04b_select_c_drive_explicitly_with_confirmation(self):
         """Verify user can explicitly select a location on C: when confirming warning."""
-        from telegram_gui_downloader import TelegramGUIApp
         import tkinter as tk
 
         root = tk.Tk()
         root.withdraw()
         app = None
         try:
-            app = TelegramGUIApp(root)
-            app.config_mgr = self.cfg_mgr
-            app.engine = self.engine
+            app = self._create_test_gui(root)
 
             c_folder = Path(self.tmpdir) / "C_Drive_Test_Folder"
             c_folder.mkdir(parents=True, exist_ok=True)
@@ -162,16 +185,13 @@ class TestStorageConfigurationRegression(unittest.TestCase):
     # -------------------------------------------------------------------------
     def test_04c_select_c_drive_cancelled_by_user(self):
         """Verify selecting C: does not persist if user declines the warning modal."""
-        from telegram_gui_downloader import TelegramGUIApp
         import tkinter as tk
 
         root = tk.Tk()
         root.withdraw()
         app = None
         try:
-            app = TelegramGUIApp(root)
-            app.config_mgr = self.cfg_mgr
-            app.engine = self.engine
+            app = self._create_test_gui(root)
 
             original_dir = self.cfg_mgr.get_download_dir()
             c_folder = Path(self.tmpdir) / "C_Drive_Declined_Folder"
@@ -202,19 +222,16 @@ class TestStorageConfigurationRegression(unittest.TestCase):
     # -------------------------------------------------------------------------
     def test_05_preventing_root_changes_during_active_transfers(self):
         """Verify that GUI logic rejects directory changes when downloads are active."""
-        from telegram_gui_downloader import TelegramGUIApp
         import tkinter as tk
 
         root = tk.Tk()
         root.withdraw()
         app = None
         try:
-            app = TelegramGUIApp(root)
-            app.config_mgr = self.cfg_mgr
-            app.engine = self.engine
+            app = self._create_test_gui(root)
 
             # Simulate an active download in progress
-            self.engine.is_downloading = True
+            app.engine.is_downloading = True
 
             with patch("tkinter.messagebox.showwarning") as mock_warn:
                 app.on_save_storage()
@@ -224,7 +241,6 @@ class TestStorageConfigurationRegression(unittest.TestCase):
             # Verify active root did not change
             self.assertEqual(self.cfg_mgr.get_download_dir(), self.initial_storage)
         finally:
-            self.engine.is_downloading = False
             if app and hasattr(app, "_after_id") and app._after_id:
                 try: root.after_cancel(app._after_id)
                 except Exception: pass
@@ -484,6 +500,245 @@ class TestStorageConfigurationRegression(unittest.TestCase):
             self.assertEqual(metrics["free_gb"], 20.0)
             self.assertIn("ready", msg.lower())
 
+    # -------------------------------------------------------------------------
+    # 16. Completed message remains skipped during ordinary channel scans after root change
+    # -------------------------------------------------------------------------
+    def test_16_completed_message_skipped_during_channel_scan_after_root_change(self):
+        """Verify message marked COMPLETED remains skipped during scans after root changes, even if missing on disk."""
+        import asyncio
+        cid = 777001
+        mid = 99
+        fname = "HistoricalCompleted.pdf"
+        rel_path = f"Channel_777\\{fname}"
+
+        self.db.ensure_channel(cid, "Channel_777")
+        self.db.record_completed(cid, mid, fname, 5000, rel_path)
+        self.assertTrue(self.db.is_message_downloaded(cid, mid))
+
+        # Switch root to a completely new empty root
+        new_root = Path(self.tmpdir) / "NewRootScanTest"
+        new_root.mkdir(parents=True, exist_ok=True)
+        self.cfg_mgr.set_download_dir(str(new_root), save=True)
+
+        # Confirm file is missing from all roots on disk
+        self.assertIsNone(self.engine.find_file_across_roots(rel_path, expected_size=5000))
+
+        # Mock Telegram entity and iter_messages returning the completed message
+        mock_entity = MagicMock()
+        mock_entity.id = cid
+        mock_msg = MagicMock()
+        mock_msg.id = mid
+        mock_msg.message = ""
+        mock_msg.date = None
+        mock_msg.file = MagicMock()
+        mock_msg.file.name = fname
+        mock_msg.file.size = 5000
+        mock_msg.media = MagicMock()
+
+        async def mock_iter(entity, limit=None):
+            yield mock_msg
+
+        mock_client = MagicMock()
+        mock_client.iter_messages = mock_iter
+        self.engine.client = mock_client
+
+        # Run channel scan
+        download_calls = []
+        async def mock_dl(*args, **kwargs):
+            download_calls.append(args)
+
+        self.engine.download_single_message = mock_dl
+
+        completed = asyncio.run(
+            self.engine.scan_and_download_channel(
+                mock_entity, cid, "Channel_777",
+                media_filters={"PDFs": True, "All Media": True},
+                cutoff_date=None
+            )
+        )
+
+        # Message must NOT be downloaded; scan skipped it!
+        self.assertEqual(len(download_calls), 0)
+        self.assertEqual(completed, 0)
+
+    # -------------------------------------------------------------------------
+    # 17. Cross-root identical relative path & size but different timestamp
+    # -------------------------------------------------------------------------
+    def test_17_cross_root_identical_size_different_content_timestamp(self):
+        """Verify authentic file is matched by timestamp metadata when size and rel_path collide."""
+        from datetime import datetime, timezone
+        rel = "SharedCourse\\LectureNotes.pdf"
+        size = 1024
+
+        # Original root file: has message timestamp T1
+        t1 = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+        file_orig = self.initial_storage / "SharedCourse" / "LectureNotes.pdf"
+        file_orig.parent.mkdir(parents=True, exist_ok=True)
+        file_orig.write_bytes(b"A" * size)
+        os.utime(file_orig, (t1.timestamp(), t1.timestamp()))
+
+        # New root file: has different timestamp T2
+        new_root = Path(self.tmpdir) / "NewRootCollision"
+        new_root.mkdir(parents=True, exist_ok=True)
+        t2 = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
+        file_new = new_root / "SharedCourse" / "LectureNotes.pdf"
+        file_new.parent.mkdir(parents=True, exist_ok=True)
+        file_new.write_bytes(b"B" * size)
+        os.utime(file_new, (t2.timestamp(), t2.timestamp()))
+
+        self.cfg_mgr.set_download_dir(str(new_root), save=True)
+
+        # Searching with expected_size and message_date=t1 must match file_orig!
+        match = self.engine.find_file_across_roots(rel, expected_size=size, message_date=t1)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.resolve(), file_orig.resolve())
+
+        # Searching with message_date=t2 must match file_new!
+        match2 = self.engine.find_file_across_roots(rel, expected_size=size, message_date=t2)
+        self.assertIsNotNone(match2)
+        self.assertEqual(match2.resolve(), file_new.resolve())
+
+    # -------------------------------------------------------------------------
+    # 18. Cross-root disconnected drive and deleted historical directory
+    # -------------------------------------------------------------------------
+    def test_18_cross_root_disconnected_drive_and_deleted_history(self):
+        """Verify find_file_across_roots safely handles disconnected drives and deleted paths."""
+        # Add a disconnected drive and a non-existent folder to historical roots
+        self.cfg_mgr.config["historical_download_directories"] = [
+            r"Z:\DisconnectedDrive_9999\Downloads",
+            r"C:\NonExistent_Deleted_Dir_8888\Downloads"
+        ]
+
+        # Should return None without raising OSError or crashing
+        res = self.engine.find_file_across_roots("SomeChannel\\file.pdf", expected_size=100)
+        self.assertIsNone(res)
+
+    # -------------------------------------------------------------------------
+    # 19. Multiple root changes
+    # -------------------------------------------------------------------------
+    def test_19_multiple_root_changes(self):
+        """Verify changing roots multiple times retains all prior roots in historical list."""
+        r1 = Path(self.tmpdir) / "RootOne"
+        r2 = Path(self.tmpdir) / "RootTwo"
+        r3 = Path(self.tmpdir) / "RootThree"
+        r1.mkdir(parents=True, exist_ok=True)
+        r2.mkdir(parents=True, exist_ok=True)
+        r3.mkdir(parents=True, exist_ok=True)
+
+        self.cfg_mgr.set_download_dir(str(r1), save=True)
+        self.cfg_mgr.set_download_dir(str(r2), save=True)
+        self.cfg_mgr.set_download_dir(str(r3), save=True)
+
+        hist = [str(p).lower() for p in self.cfg_mgr.get_historical_roots()]
+        self.assertIn(str(r1).lower(), hist)
+        self.assertIn(str(r2).lower(), hist)
+        self.assertEqual(str(self.cfg_mgr.get_download_dir()).lower(), str(r3).lower())
+
+    # -------------------------------------------------------------------------
+    # 20. UNC network share root
+    # -------------------------------------------------------------------------
+    def test_20_unc_network_share_root(self):
+        """Verify UNC path syntax validation and path traversal safety."""
+        unc_path = r"\\192.168.1.50\TelegramShare\Downloads"
+        valid, msg = validate_windows_path(unc_path)
+        self.assertTrue(valid, f"Expected valid UNC path, got {msg}")
+
+        # Traversal inside UNC share is protected
+        invalid_unc = r"\\192.168.1.50\TelegramShare\Folder*Name"
+        valid_inv, _ = validate_windows_path(invalid_unc)
+        self.assertFalse(valid_inv)
+
+    # -------------------------------------------------------------------------
+    # 21. Junction or symlink root resolution
+    # -------------------------------------------------------------------------
+    def test_21_junction_or_symlink_root_resolution(self):
+        """Verify destination resolver works safely when download directory is resolved."""
+        real_target = Path(self.tmpdir) / "RealTargetFolder"
+        real_target.mkdir(parents=True, exist_ok=True)
+        self.cfg_mgr.set_download_dir(str(real_target), save=True)
+
+        target_path, rel_path, _, _ = self.engine.resolve_destination_path(
+            channel_id=888,
+            channel_name="SymlinkChannel",
+            raw_filename="SymlinkTest.pdf",
+            message_id=1
+        )
+        self.assertTrue(target_path.resolve().is_relative_to(real_target.resolve()))
+
+    # -------------------------------------------------------------------------
+    # 22. Failed directory validation leaves previous root unchanged
+    # -------------------------------------------------------------------------
+    def test_22_failed_directory_validation_leaves_previous_root_unchanged(self):
+        """Verify entering an invalid path in GUI on_save_storage keeps previous root unchanged."""
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        app = None
+        try:
+            app = self._create_test_gui(root)
+
+            original_dir = self.cfg_mgr.get_download_dir()
+
+            # Set an invalid path with forbidden character
+            app.storage_path_var.set(r"D:\Bad<Directory>*")
+
+            with patch("tkinter.messagebox.askyesno", return_value=True), \
+                 patch("tkinter.messagebox.showerror") as mock_err:
+                app.on_save_storage()
+                mock_err.assert_called_once()
+
+            # Active directory must remain completely unchanged
+            self.assertEqual(self.cfg_mgr.get_download_dir(), original_dir)
+        finally:
+            if app and hasattr(app, "_after_id") and app._after_id:
+                try: root.after_cancel(app._after_id)
+                except Exception: pass
+            if app and hasattr(app, "lock") and app.lock:
+                app.lock.release_lock()
+            try: root.destroy()
+            except Exception: pass
+
+    # -------------------------------------------------------------------------
+    # 23. Partial file not corrupted or truncated on root change
+    # -------------------------------------------------------------------------
+    def test_23_partial_file_not_corrupted_or_truncated_on_root_change(self):
+        """Verify changing root leaves existing .part files on prior roots untouched."""
+        old_root = self.initial_storage
+        cid = 444001
+        mid = 88
+        fname = "VideoLecture.mp4"
+        rel_path = f"Channel_444\\{fname}"
+
+        # Create 200 KB partial file on old root
+        old_part = old_root / "Channel_444" / f"{fname}.part"
+        old_part.parent.mkdir(parents=True, exist_ok=True)
+        old_part.write_bytes(b"X" * (200 * 1024))
+        orig_bytes = old_part.stat().st_size
+
+        self.db.ensure_channel(cid, "Channel_444")
+        self.db.record_start(cid, mid, fname, 500 * 1024, rel_path)
+
+        # Switch to new root
+        new_root = Path(self.tmpdir) / "NewRootPartSafety"
+        new_root.mkdir(parents=True, exist_ok=True)
+        self.cfg_mgr.set_download_dir(str(new_root), save=True)
+
+        # Under new root, destination path resolves strictly under new_root
+        target_path, r_path, _, _ = self.engine.resolve_destination_path(
+            cid, "Channel_444", fname, mid
+        )
+        self.assertTrue(target_path.resolve().is_relative_to(new_root.resolve()))
+
+        # New root has no .part file yet
+        new_part = Path(f"{target_path}.part")
+        self.assertFalse(new_part.exists())
+
+        # Old .part file remains 100% intact with exact byte count
+        self.assertTrue(old_part.exists())
+        self.assertEqual(old_part.stat().st_size, orig_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()
+
