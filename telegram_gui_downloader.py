@@ -985,9 +985,7 @@ class TelegramGUIApp:
         Executes download strictly scoped to checked topics of the currently viewed forum supergroup.
         Mandatory: Fails closed if 0 topics selected. Under no circumstances falls back to all channels.
         """
-        valid, msg, _ = self.config_mgr.validate_storage()
-        if not valid:
-            messagebox.showerror("Invalid Storage", f"Cannot start downloads:\n{msg}\n\nNO fallback to C: drive allowed.")
+        if not self.verify_storage_ready_for_download():
             return
 
         account_id = self.get_account_id()
@@ -1144,9 +1142,7 @@ class TelegramGUIApp:
 
     def on_download_single_topic(self, topic_id: int):
         """Downloads only the single specified topic in the currently viewed forum supergroup."""
-        valid, msg, _ = self.config_mgr.validate_storage()
-        if not valid:
-            messagebox.showerror("Invalid Storage", f"Cannot start downloads:\n{msg}\n\nNO fallback to C: drive allowed.")
+        if not self.verify_storage_ready_for_download():
             return
 
         account_id = self.get_account_id()
@@ -1614,19 +1610,37 @@ class TelegramGUIApp:
             self.refresh_browse_tree()
 
     def update_storage_display(self):
-        target = self.storage_path_var.get().strip()
-        if not target:
+        active_dir = self.config_mgr.config.get("download_directory", "").strip()
+        textbox_target = self.storage_path_var.get().strip()
+
+        # Update Active Path label
+        if active_dir:
+            self.active_path_var.set(f"Active Path: {active_dir}")
+        else:
+            self.active_path_var.set("Active Path: (None)")
+
+        # 1. If textbox is different from active directory
+        if textbox_target and active_dir and os.path.normpath(textbox_target).lower() != os.path.normpath(active_dir).lower():
+            valid_tb, msg_tb, metrics_tb = self.config_mgr.validate_storage(textbox_target, create_if_missing=False)
+            if valid_tb:
+                self.storage_status_var.set(f"Target selected: {metrics_tb['free_gb']:.1f} GB free (NOT APPLIED - Click 'Save / Apply')")
+                self.lbl_storage_status.config(foreground="#b8860b")
+            else:
+                self.storage_status_var.set(f"Target invalid: {msg_tb} (Click 'Save / Apply' or reset)")
+                self.lbl_storage_status.config(foreground="red")
+            return
+
+        # 2. Textbox matches active directory (or active directory check)
+        check_path = active_dir if active_dir else textbox_target
+        if not check_path:
             self.storage_status_var.set("Storage: NONE SELECTED (Required)")
             self.lbl_storage_status.config(foreground="red")
             return
 
-        valid, msg, metrics = self.config_mgr.validate_storage(target, create_if_missing=False)
+        valid, msg, metrics = self.config_mgr.validate_storage(check_path, create_if_missing=False)
         if valid:
             self.storage_status_var.set(f"Free: {metrics['free_gb']:.1f} GB / {metrics['total_gb']:.1f} GB (Ready)")
             self.lbl_storage_status.config(foreground="green")
-            active_dir = self.config_mgr.config.get("download_directory", "")
-            if active_dir:
-                self.active_path_var.set(f"Active Path: {active_dir}")
         else:
             self.storage_status_var.set(f"ERROR: {msg}")
             self.lbl_storage_status.config(foreground="red")
@@ -1634,25 +1648,25 @@ class TelegramGUIApp:
     def on_browse_storage(self):
         chosen = filedialog.askdirectory(title="Select Download Storage Directory")
         if chosen:
-            self.storage_path_var.set(chosen)
+            self.storage_path_var.set(os.path.normpath(chosen))
             self.update_storage_display()
 
-    def on_save_storage(self):
+    def on_save_storage(self) -> bool:
         # Prevent changing download root during active transfers
-        if self.engine and self.engine.is_downloading:
+        if self.engine and getattr(self.engine, "is_downloading", False) is True:
             messagebox.showwarning(
                 "Download In Progress",
                 "Cannot change the download directory while downloads are actively running.\n\n"
                 "Please stop active transfers before changing the download directory."
             )
-            return
+            return False
 
         target = self.storage_path_var.get().strip()
         if not target:
             self.storage_status_var.set("Storage: NONE SELECTED (Required)")
             self.lbl_storage_status.config(foreground="red")
             messagebox.showerror("Invalid Storage", "Please select or enter a valid download directory.")
-            return
+            return False
 
         target_path = Path(os.path.normpath(target))
 
@@ -1666,7 +1680,7 @@ class TelegramGUIApp:
             if not confirm:
                 self.storage_status_var.set(f"ERROR: Directory does not exist: {target}")
                 self.lbl_storage_status.config(foreground="red")
-                return
+                return False
 
         # Check if user explicitly selected C: system drive -> warning confirmation
         if target_path.drive.upper() == "C:":
@@ -1678,22 +1692,115 @@ class TelegramGUIApp:
                 icon="warning"
             )
             if not confirm_c:
-                return
+                return False
 
         # Validate storage with safe creation approved
         valid, msg, metrics = self.config_mgr.validate_storage(target, create_if_missing=True)
         if valid:
-            resolved = self.config_mgr.set_download_dir(target)
+            resolved = self.config_mgr.set_download_dir(target, save=True)
+            if self.engine and hasattr(self.engine, "config_mgr"):
+                self.engine.config_mgr.reload_if_needed()
             self.active_path_var.set(f"Active Path: {resolved}")
             self.storage_path_var.set(str(resolved))
-            self.storage_status_var.set(f"Free: {metrics['free_gb']:.1f} GB / {metrics['total_gb']:.1f} GB (Ready)")
-            self.lbl_storage_status.config(foreground="green")
+            self.update_storage_display()
             self.log(f"INFO: Download location successfully changed to: {resolved}")
             messagebox.showinfo("Storage Applied", f"Download directory set to:\n{resolved}\n\nFuture downloads will be saved here.")
+            return True
         else:
-            self.storage_status_var.set(f"ERROR: {msg}")
-            self.lbl_storage_status.config(foreground="red")
+            self.update_storage_display()
             messagebox.showerror("Invalid Storage", f"Storage validation failed:\n{msg}")
+            return False
+
+    def verify_storage_ready_for_download(self) -> bool:
+        """
+        Unified pre-flight guard before initiating any download:
+        1. Confirms transfers are not already active in another conflicting mode.
+        2. Detects if textbox path differs from active configured root.
+           If different, prompts user to apply the new path or aborts.
+        3. Authoritatively resolves active storage root from ConfigManager.
+        4. Validates the resolved root (existence, writable, capacity).
+        5. Verifies GUI active path and Engine effective root are in 100% agreement.
+        6. Enforces zero fallback to C: or removed historical drives (e.g. F:).
+        """
+        if self.engine and getattr(self.engine, "is_downloading", False) is True:
+            messagebox.showwarning("Download Active", "Downloads are already running.")
+            return False
+
+        # 1. Check if unapplied text in storage entry textbox differs from active config
+        active_dir_raw = self.config_mgr.config.get("download_directory", "").strip()
+        textbox_raw = self.storage_path_var.get().strip()
+
+        if textbox_raw and active_dir_raw:
+            norm_textbox = os.path.normpath(textbox_raw).lower()
+            norm_active = os.path.normpath(active_dir_raw).lower()
+            if norm_textbox != norm_active:
+                apply_now = messagebox.askyesno(
+                    "Unapplied Storage Location",
+                    f"The download directory entered in the textbox:\n\n  {textbox_raw}\n\n"
+                    f"has not been applied yet. The currently active download directory is:\n\n  {active_dir_raw}\n\n"
+                    f"Would you like to save and apply '{textbox_raw}' as the new active download location now?",
+                    icon="question"
+                )
+                if apply_now:
+                    success = self.on_save_storage()
+                    if not success:
+                        return False
+                else:
+                    messagebox.showwarning(
+                        "Storage Mismatch",
+                        f"Download aborted: The directory in the textbox does not match the active download directory.\n\n"
+                        f"Active Root: {active_dir_raw}\n"
+                        f"Textbox:     {textbox_raw}\n\n"
+                        f"Please click 'Save / Apply' or reset the textbox before downloading."
+                    )
+                    return False
+        elif textbox_raw and not active_dir_raw:
+            success = self.on_save_storage()
+            if not success:
+                return False
+
+        # 2. Authoritative resolution from current configuration
+        try:
+            active_root = self.config_mgr.get_download_dir()
+        except StorageError as se:
+            messagebox.showerror("No Storage Configured", f"Cannot start downloads:\n\n{se}")
+            return False
+
+        # 3. Validate actual resolved root
+        valid, msg, metrics = self.config_mgr.validate_storage(str(active_root))
+        if not valid:
+            self.update_storage_display()
+            messagebox.showerror(
+                "Invalid Storage Destination",
+                f"Cannot start downloads against active directory:\n\n{active_root}\n\n"
+                f"Error: {msg}\n\n"
+                f"ZERO fallback to C: or removed drives (such as F:) is permitted.\n"
+                f"Please select and apply a healthy storage directory."
+            )
+            return False
+
+        # 4. Engine / GUI Agreement Check
+        if self.engine and hasattr(self.engine, "config_mgr"):
+            try:
+                # If engine has a real ConfigManager or a valid configured path
+                if isinstance(getattr(self.engine, "config_mgr", None), ConfigManager):
+                    engine_root = self.engine.config_mgr.get_download_dir()
+                    if os.path.normpath(str(engine_root)).lower() != os.path.normpath(str(active_root)).lower():
+                        messagebox.showerror(
+                            "Storage Desynchronization",
+                            f"Fatal storage mismatch: GUI active path ({active_root}) and "
+                            f"Engine root ({engine_root}) disagree.\nDownload refused."
+                        )
+                        return False
+            except Exception as ex:
+                messagebox.showerror("Engine Storage Error", f"Engine failed to resolve download directory: {ex}")
+                return False
+
+        # 5. Synchronize GUI labels
+        self.active_path_var.set(f"Active Path: {active_root}")
+        self.storage_path_var.set(str(active_root))
+        self.update_storage_display()
+        return True
 
     def on_save_settings(self):
         filters = {k: v.get() for k, v in self.media_vars.items()}
@@ -1868,11 +1975,8 @@ class TelegramGUIApp:
     def on_download(self):
         if self.is_monitoring_mode: return
 
-        # Check storage before starting
-        target = self.storage_path_var.get().strip()
-        valid, msg, _ = self.config_mgr.validate_storage(target)
-        if not valid:
-            messagebox.showerror("Invalid Storage", f"Cannot start downloads:\n{msg}\n\nNO fallback to C: is permitted.")
+        # Unified pre-flight storage validation
+        if not self.verify_storage_ready_for_download():
             return
 
         account_id = self.get_account_id()

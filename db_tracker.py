@@ -728,10 +728,10 @@ class DownloadTrackerDB:
             cursor = conn.execute("""
                 SELECT 
                     COUNT(*) as total_records,
-                    SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed,
-                    SUM(CASE WHEN status = 'DOWNLOADING' THEN 1 ELSE 0 END) as in_progress,
-                    SUM(CASE WHEN status = 'COMPLETED' THEN file_size ELSE 0 END) as total_bytes_downloaded
+                    COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END), 0) as completed,
+                    COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0) as failed,
+                    COALESCE(SUM(CASE WHEN status = 'DOWNLOADING' THEN 1 ELSE 0 END), 0) as in_progress,
+                    COALESCE(SUM(CASE WHEN status = 'COMPLETED' THEN file_size ELSE 0 END), 0) as total_bytes_downloaded
                 FROM downloads
             """)
             row = dict(cursor.fetchone() or {})

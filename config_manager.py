@@ -78,7 +78,24 @@ def validate_windows_path(path_str: str) -> Tuple[bool, str]:
 class ConfigManager:
     def __init__(self, config_path: str = DEFAULT_CONFIG_PATH):
         self.config_path = Path(config_path)
+        self._last_loaded_mtime = self.config_path.stat().st_mtime if self.config_path.exists() else 0
         self.config = self.load_config()
+
+    def reload_if_needed(self) -> bool:
+        """
+        Dynamically reloads configuration from disk if config.json was modified
+        externally by another process or thread.
+        """
+        try:
+            if self.config_path.exists():
+                mtime = self.config_path.stat().st_mtime
+                if mtime > getattr(self, "_last_loaded_mtime", 0):
+                    self.config = self.load_config()
+                    self._last_loaded_mtime = mtime
+                    return True
+        except Exception as e:
+            logger.debug(f"Config reload check exception: {e}")
+        return False
 
     def load_config(self) -> Dict[str, Any]:
         if not self.config_path.exists():
@@ -107,6 +124,7 @@ class ConfigManager:
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2)
             os.replace(temp_file, self.config_path)
+            self._last_loaded_mtime = self.config_path.stat().st_mtime if self.config_path.exists() else 0
         except Exception as e:
             logger.error(f"Error saving config to {self.config_path}: {e}")
             if os.path.exists(temp_file):
@@ -120,6 +138,7 @@ class ConfigManager:
         Authoritative download storage root resolver.
         Returns Path instance for active configured directory or raises StorageError.
         """
+        self.reload_if_needed()
         raw = self.config.get("download_directory", "").strip()
         if not raw:
             raise StorageError("Download directory is not configured. Please select a destination drive.")
@@ -129,6 +148,7 @@ class ConfigManager:
         """
         Sets active download directory, archiving any previous root into historical roots list.
         """
+        self.reload_if_needed()
         target_str = os.path.normpath(str(new_path).strip())
         old_dir = str(self.config.get("download_directory", "")).strip()
         if old_dir:
@@ -148,6 +168,7 @@ class ConfigManager:
         """
         Returns list of historical download roots for backward-compatible lookup.
         """
+        self.reload_if_needed()
         roots: List[Path] = []
         for raw in self.config.get("historical_download_directories", []):
             s = str(raw).strip()
@@ -162,6 +183,8 @@ class ConfigManager:
         Validates target storage accessibility, write permissions, and disk space.
         Returns: (is_valid, status_message, disk_metrics)
         """
+        if custom_path is None:
+            self.reload_if_needed()
         target_str = custom_path if custom_path is not None else self.config.get("download_directory", "")
         target_str = str(target_str).strip()
         if not target_str:

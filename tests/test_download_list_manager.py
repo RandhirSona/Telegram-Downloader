@@ -291,28 +291,30 @@ class TestDownloadListManager(unittest.TestCase):
 
     # 14. Concurrent GUI and Worker ProcessLock Competition
     def test_process_lock_gui_and_worker_concurrency(self):
-        from instance_lock import ProcessLock
-        lock_gui = ProcessLock(role="gui")
-        lock_worker = ProcessLock(role="worker")
+        import instance_lock
+        isolated_lock = Path(self.tmpdir) / "downloader.lock"
+        with patch.object(instance_lock, "LOCK_FILE", isolated_lock):
+            lock_gui = instance_lock.ProcessLock(role="gui")
+            lock_worker = instance_lock.ProcessLock(role="worker")
 
-        # Clean any leftover lock for test isolation
-        lock_gui.release_lock()
+            # Clean any leftover lock for test isolation
+            lock_gui.release_lock()
 
-        # GUI acquires session lock
-        acquired_gui = lock_gui.acquire_session_lock()
-        self.assertTrue(acquired_gui)
+            # GUI acquires session lock
+            acquired_gui = lock_gui.acquire_session_lock()
+            self.assertTrue(acquired_gui)
 
-        # Worker attempts to acquire session lock and MUST fail
-        acquired_worker = lock_worker.acquire_session_lock()
-        self.assertFalse(acquired_worker)
+            # Worker attempts to acquire session lock and MUST fail
+            acquired_worker = lock_worker.acquire_session_lock()
+            self.assertFalse(acquired_worker)
 
-        # Release GUI lock
-        lock_gui.release_lock()
+            # Release GUI lock
+            lock_gui.release_lock()
 
-        # Worker should now be able to acquire session lock
-        acquired_worker_after = lock_worker.acquire_session_lock()
-        self.assertTrue(acquired_worker_after)
-        lock_worker.release_lock()
+            # Worker should now be able to acquire session lock
+            acquired_worker_after = lock_worker.acquire_session_lock()
+            self.assertTrue(acquired_worker_after)
+            lock_worker.release_lock()
 
     # 15. SQLite WAL Concurrent Reads and Writes
     def test_wal_concurrent_reads_and_writes(self):
